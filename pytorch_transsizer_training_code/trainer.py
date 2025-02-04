@@ -4,7 +4,7 @@ import math
 import os
 import numpy as np
 
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import TensorDataset, Dataset, DataLoader
 from model import TwoEncoderTransformer, export_model_weights_robust
 
 def load_embeddings(filename):
@@ -36,6 +36,248 @@ def load_2d_int_tensor(filename):
         arr = np.frombuffer(f.read(), dtype=np.int32).reshape(R, C)
         return torch.from_numpy(arr.copy())
     
+
+# -----------------------------------------------------------------------------
+# Custom Dataset for TransSizer
+# -----------------------------------------------------------------------------
+
+class TransSizerDataset(Dataset):
+    """
+    A PyTorch Dataset that loads the five binary files from a given design
+    directory. Each design directory is expected to contain:
+      - data_array.bin
+      - encoder_2_input_libcell_type_ids.bin
+      - ASAP7_libcell_type_embeddings.bin
+      - encoder_2_output_avail_libcell_num.bin
+      - labels.bin
+    """
+    def __init__(self, design_dirs):
+        """
+        Args:
+            design_dirs (list of str): List of directories, one per design.
+        """
+        self.design_dirs = design_dirs
+
+    def __len__(self):
+        return len(self.design_dirs)
+
+    def __getitem__(self, idx):
+        design_dir = self.design_dirs[idx]
+
+        # Construct full paths for each file
+        data_array_path = os.path.join(design_dir, "data_array.bin")
+        type_ids_path = os.path.join(design_dir, "encoder_2_input_libcell_type_ids.bin")
+        embeddings_path = os.path.join(design_dir, "ASAP7_libcell_type_embeddings.bin")
+        avail_libcell_num_path = os.path.join(design_dir, "encoder_2_output_avail_libcell_num.bin")
+        labels_path = os.path.join(design_dir, "labels.bin")
+
+        # Load each file
+        data1 = load_3d_tensor(data_array_path)
+        type_ids = load_2d_int_tensor(type_ids_path)
+        type_embeddings = load_embeddings(embeddings_path)
+        encoder2_avail = load_2d_int_tensor(avail_libcell_num_path)
+        labels = load_2d_int_tensor(labels_path).long()
+
+        # Process type_ids and generate data2:
+        #   - Replace invalid type_ids (-1) with 0 for indexing
+        #   - Then zero-out embeddings where type_ids were originally -1
+        mask = (type_ids == -1)
+        safe_ids = type_ids.clone()
+        safe_ids[mask] = 0
+        data2 = type_embeddings[safe_ids]
+        data2[mask.unsqueeze(-1).expand_as(data2)] = 0
+
+        # Convert encoder2_avail to long (if needed)
+        safe_encoder2_avail = encoder2_avail.clone().long()
+
+        # Return a dictionary of tensors.
+        # The training code can later use the keys "data1", "data2", "labels",
+        # "encoder2_avail", and "type_ids" as needed.
+        sample = {
+            "data1": data1,
+            "data2": data2,
+            "labels": labels,
+            "encoder2_avail": safe_encoder2_avail,
+            "type_ids": type_ids,
+        }
+        return sample
+
+# -----------------------------------------------------------------------------
+# Helper functions to create DataLoaders for training and validation.
+# -----------------------------------------------------------------------------
+
+def create_dataloader(design_dirs, batch_size=1, shuffle=True, num_workers=0):
+    """
+    Creates a DataLoader from a list of design directories.
+    """
+    dataset = TransSizerDataset(design_dirs)
+    dataloader = DataLoader(dataset,
+                            batch_size=batch_size,
+                            shuffle=shuffle,
+                            num_workers=num_workers)
+    return dataloader
+
+def create_train_val_dataloaders(train_dirs, val_dirs,
+                                 batch_size=1, shuffle=True, num_workers=0):
+    """
+    Given a base directory for training designs and another for validation designs,
+    this function collects the individual design directories and creates DataLoaders.
+    
+    Args:
+        train_dirs (list): List containing training design folders.
+        val_dirs (list): List containing validation design folders.
+        batch_size (int): Batch size (each sample is a design).
+        shuffle (bool): Whether to shuffle the training designs.
+        num_workers (int): Number of worker threads for data loading.
+    
+    Returns:
+        train_loader, val_loader: Two DataLoaders for training and validation.
+    """
+    # List all subdirectories (designs) in the provided base paths
+    #train_design_dirs = [os.path.join(train_base_dir, d) for d in os.listdir(train_base_dir) if os.path.isdir(os.path.join(train_base_dir, d))]
+    #val_design_dirs = [os.path.join(val_base_dir, d) for d in os.listdir(val_base_dir) if os.path.isdir(os.path.join(val_base_dir, d))]
+    
+    train_loader = create_dataloader(train_dirs,
+                                     batch_size=batch_size,
+                                     shuffle=shuffle,
+                                     num_workers=num_workers)
+    val_loader = create_dataloader(val_dirs,
+                                   batch_size=batch_size,
+                                   shuffle=False,  # Typically no need to shuffle validation data
+                                   num_workers=num_workers)
+    return train_loader, val_loader
+
+# -----------------------------------------------------------------------------
+# Training function with validation evaluation
+# -----------------------------------------------------------------------------
+
+def train_model(train_loader, val_loader, num_epochs=5, warmup_ratio=0.1, device="cpu"):
+    # -------------------------------------------------------------------------
+    # 1. Model Configuration (using your hyper-parameters)
+    # -------------------------------------------------------------------------
+    D_in = 786   # e.g., 768 + 18 
+    D_out = 50   # maximum number of classes
+    D_emb = 768
+    D_model = 128
+    FF_hidden_dim = 4 * D_model  # 512
+    num_heads = 8
+    num_encoder_layers = 6
+    num_encoder_layers_2 = 2
+
+    model = TwoEncoderTransformer(
+        D_in, D_out, D_emb, D_model, FF_hidden_dim,
+        num_heads, num_encoder_layers, num_encoder_layers_2
+    )
+    model.to(device)
+    model.train()
+
+    # -------------------------------------------------------------------------
+    # 2. Loss & Optimizer
+    # -------------------------------------------------------------------------
+    criterion = CustomCrossEntropyLoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+    # Total training steps (one step per batch)
+    total_steps = num_epochs * len(train_loader)
+    warmup_steps = int(warmup_ratio * total_steps)
+
+    def lr_lambda(current_step: int):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        else:
+            progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            return max(0.0, 1.0 - progress)
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+    global_step = 0
+    for epoch in range(num_epochs):
+        # -----------------------------
+        # Training Loop
+        # -----------------------------
+        for batch in train_loader:
+            data1 = batch["data1"].to(device)
+            data2 = batch["data2"].to(device)
+            labels = batch["labels"].to(device)
+            encoder2_avail = batch["encoder2_avail"].to(device)
+            type_ids = batch["type_ids"].to(device)
+
+            optimizer.zero_grad()
+            out = model(data1, data2)  # expected shape: [bsz, L2, D_out]
+            loss = criterion(out, labels, encoder2_avail)
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            global_step += 1
+
+            preds = out.argmax(dim=2)  # [bsz, L2]
+            correct = (preds == labels).sum().item()
+            total = labels.numel()
+            accuracy = correct / total
+
+            # Accuracy excluding padding tokens (where type_ids == -1)
+            mask = (type_ids != -1)
+            valid_count = mask.sum().item()
+            valid_correct = (preds[mask] == labels[mask]).sum().item()
+            valid_accuracy = valid_correct / valid_count if valid_count > 0 else 0.0
+
+            current_lr = scheduler.get_last_lr()[0]  # Assumes a single param group
+            print(f"[Train] Epoch [{epoch+1}/{num_epochs}] Step {global_step} "
+                  f"LR={current_lr:.6f} Loss={loss.item():.4f} "
+                  f"Acc={accuracy*100:.2f}% Valid Acc={valid_accuracy*100:.2f}%")
+
+        # -----------------------------
+        # Validation Evaluation Step
+        # -----------------------------
+        model.eval()
+        val_loss_total = 0.0
+        val_correct = 0
+        val_total = 0
+        val_valid_correct = 0
+        val_valid_count = 0
+
+        with torch.no_grad():
+            for batch in val_loader:
+                data1 = batch["data1"].to(device)
+                data2 = batch["data2"].to(device)
+                labels = batch["labels"].to(device)
+                encoder2_avail = batch["encoder2_avail"].to(device)
+                type_ids = batch["type_ids"].to(device)
+
+                out = model(data1, data2)
+                loss = criterion(out, labels, encoder2_avail)
+                # Multiply by the number of samples in this batch for weighted average.
+                batch_size = data1.size(0)
+                val_loss_total += loss.item() * batch_size
+
+                preds = out.argmax(dim=2)
+                batch_correct = (preds == labels).sum().item()
+                batch_total = labels.numel()
+                val_correct += batch_correct
+                val_total += batch_total
+
+                mask = (type_ids != -1)
+                batch_valid_correct = (preds[mask] == labels[mask]).sum().item()
+                batch_valid_count = mask.sum().item()
+                val_valid_correct += batch_valid_correct
+                val_valid_count += batch_valid_count
+
+        # Compute average validation loss and accuracy
+        avg_val_loss = val_loss_total / len(val_loader.dataset)
+        overall_val_accuracy = val_correct / val_total if val_total > 0 else 0
+        valid_val_accuracy = val_valid_correct / val_valid_count if val_valid_count > 0 else 0
+
+        print(f"[Validation] Epoch [{epoch+1}/{num_epochs}] "
+              f"Avg Loss: {avg_val_loss:.4f} "
+              f"Overall Acc: {overall_val_accuracy*100:.2f}% "
+              f"Valid Acc (excl. padding): {valid_val_accuracy*100:.2f}%")
+
+        # Set model back to training mode for next epoch
+        model.train()
+
+    return model
+
+
 def example_train():
     # Hyperparams (example)
     D_in = 786 # 768 + 18  #17 
@@ -907,6 +1149,300 @@ def example_train_5(base_path="./", num_epochs=5, warmup_ratio=0.1):
     print(f"Accuracy: {valid_accuracy*100:.2f}%")
     return model
 
+# -------------------------------------------------------------------------
+# 2. Custom Dataset to hold *all* data from multiple base_paths
+# -------------------------------------------------------------------------
+class MultiPathDataset(Dataset):
+    def __init__(self, base_paths):
+        """
+        Loads and concatenates data from each path in 'base_paths'.
+        """
+        all_data1 = []
+        all_data2 = []
+        all_targets = []
+        all_type_ids = []
+        all_safe_encoder_2 = []
+
+        # We load the shared type embeddings once (assuming the same file for each base_path).
+        # If each base_path has a separate embedding file, you can adapt below.
+        # Here we assume the same path name "ASAP7_libcell_type_embeddings.bin" in each folder
+        # but you can change logic if needed.
+        # We'll load the first available embedding file as a demonstration:
+        #   type_embeddings = load_embeddings(os.path.join(base_paths[0], "ASAP7_libcell_type_embeddings.bin"))
+        # If each base_path has the same embedding, you can do this once outside the loop.
+        # If each base_path has different embeddings, adjust accordingly.
+        
+        # Just load from the first base_path for demonstration:
+        first_path = base_paths[0]
+        embedding_file = os.path.join(first_path, "ASAP7_libcell_type_embeddings.bin")
+        print(f"Loading type embeddings from: {embedding_file}")
+        self.type_embeddings = load_embeddings(embedding_file)  # shape [num_types, D_emb]
+
+        for bp in base_paths:
+            print(f"Loading data from base_path={bp}")
+            # -------------------------
+            # data1: 3D float tensor
+            # -------------------------
+            data1_path = os.path.join(bp, "data_array.bin")
+            data1 = load_3d_tensor(data1_path)  # shape [bsz, L, D_in]
+
+            # -------------------------
+            # type_ids: 2D int tensor
+            # -------------------------
+            type_ids_path = os.path.join(bp, "encoder_2_input_libcell_type_ids.bin")
+            type_ids = load_2d_int_tensor(type_ids_path).long()  # shape [bsz, L2]
+            
+            # -------------------------
+            # safe_encoder_2_output_avail_libcell_num
+            # -------------------------
+            avail_libcell_num_path = os.path.join(bp, "encoder_2_output_avail_libcell_num.bin")
+            safe_encoder_2 = load_2d_int_tensor(avail_libcell_num_path).long()  # shape [bsz, L2]
+
+            # -------------------------
+            # target: 2D tensor [bsz, L2]
+            # -------------------------
+            label_path = os.path.join(bp, "labels.bin")
+            target = load_2d_int_tensor(label_path).long()
+
+            # Build data2 from type_ids + embeddings, just like your single-batch code
+            mask = (type_ids == -1)
+            safe_ids = type_ids.clone()
+            safe_ids[mask] = 0  # so we don't go out of index
+            data2 = self.type_embeddings[safe_ids]  # shape [bsz, L2, D_emb]
+            data2[mask.unsqueeze(-1).expand_as(data2)] = 0
+
+            # Accumulate
+            all_data1.append(data1)
+            all_data2.append(data2)
+            all_targets.append(target)
+            all_type_ids.append(type_ids)
+            all_safe_encoder_2.append(safe_encoder_2)
+
+        # ----------------------------------------------------
+        # Concatenate along dimension=0 (the batch dimension)
+        # ----------------------------------------------------
+        self.data1 = torch.cat(all_data1, dim=0)     # shape [sum(bsz), L, D_in]
+        self.data2 = torch.cat(all_data2, dim=0)     # shape [sum(bsz), L2, D_emb]
+        self.targets = torch.cat(all_targets, dim=0) # shape [sum(bsz), L2]
+        self.type_ids = torch.cat(all_type_ids, dim=0) # shape [sum(bsz), L2]
+        self.safe_encoder_2 = torch.cat(all_safe_encoder_2, dim=0)
+
+        # Just to confirm final shapes:
+        print(f"Final combined data1 shape: {self.data1.shape}")
+        print(f"Final combined data2 shape: {self.data2.shape}")
+        print(f"Final combined targets shape: {self.targets.shape}")
+        print(f"Final combined type_ids shape: {self.type_ids.shape}")
+        print(f"Final combined safe_encoder_2 shape: {self.safe_encoder_2.shape}")
+
+    def __len__(self):
+        return self.data1.size(0)  # total number of "samples" across all base_paths
+
+    def __getitem__(self, idx):
+        """
+        Return a single sample: (data1, data2, target, type_ids, safe_encoder_2).
+        """
+        return (
+            self.data1[idx], 
+            self.data2[idx], 
+            self.targets[idx], 
+            self.type_ids[idx],
+            self.safe_encoder_2[idx]
+        )
+
+# -------------------------------------------------------------------------
+# 3. Example Training Function using DataLoader
+# -------------------------------------------------------------------------
+def train_multiple_paths(
+    base_paths,
+    val_paths=None, 
+    num_epochs=5, 
+    warmup_ratio=0.1, 
+    batch_size=2, 
+    shuffle=True,
+    device="cpu"
+):
+    """
+    Demonstration of how to train using data from multiple base_paths with mini-batching.
+    """
+    # ---------------------------------------------------------------------
+    # A) Create model (same as your single-batch code)
+    # ---------------------------------------------------------------------
+    D_in = 786   # 768 + 18 
+    D_out = 50   # maximum number of classes
+    D_emb = 768
+    D_model = 128
+    FF_hidden_dim = 4 * D_model  # 512
+    num_heads = 8
+    num_encoder_layers = 6
+    num_encoder_layers_2 = 2
+
+    model = TwoEncoderTransformer(
+        D_in, D_out, D_emb, D_model, FF_hidden_dim,
+        num_heads, num_encoder_layers, num_encoder_layers_2
+    )
+    model.to(device)
+    model.train()
+
+    # ---------------------------------------------------------------------
+    # B) Create the Dataset + DataLoader
+    # ---------------------------------------------------------------------
+    dataset = MultiPathDataset(base_paths=base_paths)
+    # The type embeddings are stored in dataset.type_embeddings
+    # if you want them in your training loop for anything else.
+
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=False)
+
+    # Create a validation dataset if provided
+    val_dataset = MultiPathDataset(base_paths=val_paths) if val_paths else None
+
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False) if val_dataset else None
+
+    # ---------------------------------------------------------------------
+    # C) Define Loss and Optimizer
+    # ---------------------------------------------------------------------
+    criterion = CustomCrossEntropyLoss()  # or nn.CrossEntropyLoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+
+    # ---------------------------------------------------------------------
+    # D) LR Scheduler: Linear Warmup & Decay (per-step)
+    # ---------------------------------------------------------------------
+    total_steps = num_epochs * len(dataloader)
+    warmup_steps = int(warmup_ratio * total_steps)
+
+    def lr_lambda(current_step: int):
+        if current_step < warmup_steps:
+            # Linear warmup
+            return float(current_step) / float(max(1, warmup_steps))
+        else:
+            # Linear decay
+            progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            return max(0.0, 1.0 - progress)
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+    # ---------------------------------------------------------------------
+    # E) Training Loop
+    # ---------------------------------------------------------------------
+    global_step = 0
+    for epoch in range(num_epochs):
+        # Optionally track epoch-level metrics
+        epoch_loss = 0.0
+        epoch_correct = 0
+        epoch_total = 0
+
+        epoch_padding_excluded_correct = 0
+        epoch_padding_excluded_total = 0
+
+
+        for step, (data1_batch, data2_batch, target_batch, type_ids_batch, safe_encoder_2_batch) in enumerate(dataloader):
+            # Move data to device
+            data1_batch = data1_batch.to(device)
+            data2_batch = data2_batch.to(device)
+            target_batch = target_batch.to(device)
+            type_ids_batch = type_ids_batch.to(device)
+            safe_encoder_2_batch = safe_encoder_2_batch.to(device)
+            
+            optimizer.zero_grad()
+
+            # Forward pass
+            out = model(data1_batch, data2_batch)  # shape [bsz, L2, D_out]
+
+            # Compute loss
+            loss = criterion(out, target_batch, safe_encoder_2_batch)  
+            loss.backward()
+            optimizer.step()
+            scheduler.step()   # Update LR per-step
+            global_step += 1
+
+            epoch_loss += loss.item()
+
+            # -----------------------------------------------------------------
+            # Accuracy (including or excluding padding)
+            # If you still need the mask, note that you no longer have 'type_ids'
+            # in this mini-batch directly unless you store them. For a "valid" 
+            # accuracy you might need to store the original mask. 
+            #
+            # For demonstration, let's do naive accuracy:
+            # -----------------------------------------------------------------
+            preds = out.argmax(dim=2)  # shape [bsz, L2]
+            correct = (preds == target_batch).sum().item()
+            total = target_batch.numel()
+            epoch_correct += correct
+            epoch_total   += total
+
+            # Use type_ids to compute accuracy excluding padding tokens
+            mask = (type_ids_batch != -1)
+            valid_correct = (preds[mask] == target_batch[mask]).sum().item()
+            valid_total = mask.sum().item()
+            valid_accuracy = valid_correct / valid_total if valid_total > 0 else 0.0
+            epoch_padding_excluded_correct += valid_correct
+            epoch_padding_excluded_total += valid_total
+
+
+
+        # Print epoch summary
+        epoch_acc = epoch_correct / epoch_total if epoch_total > 0 else 0.0
+        epoch_padding_excluded_acc = epoch_padding_excluded_correct / epoch_padding_excluded_total if epoch_padding_excluded_total > 0 else 0.0
+        avg_epoch_loss = epoch_loss / len(dataloader)
+
+
+        print(
+            f"Epoch [{epoch+1}/{num_epochs}] | "
+            f"Global Step={global_step} | "
+            f"LR={scheduler.get_last_lr()[0]:.6f} | "
+            f"Loss={avg_epoch_loss:.4f} | "
+            f"Acc={epoch_acc*100:.2f}% | "
+            f"Valid Acc={epoch_padding_excluded_acc*100:.2f}%"  # Accuracy excluding padding tokens 
+        )
+        # Validation loop (if provided)
+        if val_dataloader:
+            model.eval()
+            val_loss_total = 0.0
+            val_correct = 0
+            val_total = 0
+            val_padding_excluded_correct = 0
+            val_padding_excluded_total = 0
+            with torch.no_grad():
+
+                for val_data1, val_data2, val_target, val_type_ids, val_safe_encoder_2 in val_dataloader:
+                    val_data1 = val_data1.to(device)
+                    val_data2 = val_data2.to(device)
+                    val_target = val_target.to(device)
+                    val_type_ids = val_type_ids.to(device)
+                    val_safe_encoder_2 = val_safe_encoder_2.to(device)
+
+                    val_out = model(val_data1, val_data2)
+                    val_loss = criterion(val_out, val_target, val_safe_encoder_2)
+
+                    val_loss_total += val_loss.item()
+
+                    val_preds = val_out.argmax(dim=2)
+                    val_correct += (val_preds == val_target).sum().item()
+                    val_total += val_target.numel()
+
+                    val_mask = (val_type_ids != -1)
+                    val_valid_correct = (val_preds[val_mask] == val_target[val_mask]).sum().item()
+                    val_valid_total = val_mask.sum().item()
+                    val_padding_excluded_correct += val_valid_correct
+                    val_padding_excluded_total += val_valid_total
+            # Compute validation metrics
+            val_acc = val_correct / val_total if val_total > 0 else 0.0
+            val_padding_excluded_acc = val_padding_excluded_correct / val_padding_excluded_total if val_padding_excluded_total > 0 else 0.0
+            avg_val_loss = val_loss_total / len(val_dataloader)
+            # Print validation metrics
+            print(
+                f"Validation | "
+                f"Loss={avg_val_loss:.4f} | "
+                f"Acc={val_acc*100:.2f}% | "
+                f"Valid Acc={val_padding_excluded_acc*100:.2f}%"  # Accuracy excluding padding tokens
+            )
+            model.train() # Set back to train mode
+
+
+
+    print("Training complete.")
+    return model
+
 if __name__ == "__main__":
     #trained_model = example_train()
     #type_embeddings = load_embeddings("/home/kmcho/2_Project/ML_GateSizing_OpenROAD/dev_repo/test_scripts/pytorch_transsizer_training_code/ASAP7_libcell_type_embeddings.bin")
@@ -915,7 +1451,40 @@ if __name__ == "__main__":
     #trained_model = example_train_4(batch_size=4, num_epochs=10, warmup_ratio=0.2, lr=1e-3, device='cuda')
     # Added loading encoder_2_output_avail_libcell_num from example_train_5 onwards
     # This masks out libcell's that exceed the maximum number of available libcells for that particular libcell type
-    trained_model = example_train_5(base_path= "./NV_NVDLA_partition_m", num_epochs=1, warmup_ratio=0.2)
+    #trained_model = example_train_5(base_path= "./NV_NVDLA_partition_m", num_epochs=1, warmup_ratio=0.2)
+
+    train_base_dir = ["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256", "./train_data/mempool_tile_wrap"]
+    val_base_dir = ["./train_data/NV_NVDLA_partition_m"]
+    trained_model = train_multiple_paths(
+        base_paths=train_base_dir,
+        val_paths=val_base_dir,
+        num_epochs=20,
+        warmup_ratio=0.2,
+        batch_size=256,
+        shuffle=True,
+        device="cuda:2"
+    )
+
+    """
+    # Create Dataloaders
+    train_loader, val_loader = create_train_val_dataloaders(
+        train_base_dir, val_base_dir, 
+        batch_size=16,
+        shuffle=True,
+        num_workers=0)
+    
+    device =  "cuda" if torch.cuda.is_available() else "cpu"
+
+    trained_model = train_model(
+        train_loader, val_loader,
+        num_epochs=10,
+        warmup_ratio=0.2,
+        device=device
+    )
+    """
+
+
+
     print("Training completed.")
     # Print model summary
     print(trained_model)
