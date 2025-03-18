@@ -1160,7 +1160,7 @@ class MultiPathDataset(Dataset):
         Loads and concatenates data from each path in 'base_paths'.
         """
         all_data1 = []
-        all_data2 = []
+        all_libcell_ids = []
         all_targets = []
         all_type_ids = []
         all_safe_encoder_2 = []
@@ -1189,6 +1189,12 @@ class MultiPathDataset(Dataset):
             data1 = load_3d_tensor(data1_path)  # shape [bsz, L, D_in]
 
             # -------------------------
+            # libcell_ids: 2D int tensor
+            # -------------------------
+            libcell_ids_path = os.path.join(bp, "libcell_ids.bin")
+            libcell_ids = load_2d_int_tensor(libcell_ids_path).long()  # shape [bsz, L]
+
+            # -------------------------
             # type_ids: 2D int tensor
             # -------------------------
             type_ids_path = os.path.join(bp, "encoder_2_input_libcell_type_ids.bin")
@@ -1206,36 +1212,29 @@ class MultiPathDataset(Dataset):
             label_path = os.path.join(bp, "labels.bin")
             target = load_2d_int_tensor(label_path).long()
 
-            # Build data2 from type_ids + embeddings, just like your single-batch code
-            mask = (type_ids == -1)
-            safe_ids = type_ids.clone()
-            safe_ids[mask] = 0  # so we don't go out of index
-            data2 = self.type_embeddings[safe_ids]  # shape [bsz, L2, D_emb]
-            data2[mask.unsqueeze(-1).expand_as(data2)] = 0
-
             # Accumulate
             all_data1.append(data1)
-            all_data2.append(data2)
+            all_libcell_ids.append(libcell_ids)
             all_targets.append(target)
             all_type_ids.append(type_ids)
             all_safe_encoder_2.append(safe_encoder_2)
 
             # Print the shapes of data1, data2, targets, type_ids, and safe_encoder_2
-            print(f"Data1 shape: {data1.shape}, Data2 shape: {data2.shape}, Target shape: {target.shape}")
+            print(f"Data1 shape: {data1.shape}, Libcell IDs shape: {libcell_ids.shape}, Target shape: {target.shape}")
             print(f"Type IDs shape: {type_ids.shape}, Safe Encoder 2 shape: {safe_encoder_2.shape}\n")
 
         # ----------------------------------------------------
         # Concatenate along dimension=0 (the batch dimension)
         # ----------------------------------------------------
-        self.data1 = torch.cat(all_data1, dim=0)     # shape [sum(bsz), L, D_in]
-        self.data2 = torch.cat(all_data2, dim=0)     # shape [sum(bsz), L2, D_emb]
+        self.data1 = torch.cat(all_data1, dim=0)     # shape [sum(bsz), L, D_in], encoder_1_numerical data
+        self.libcell_ids = torch.cat(all_libcell_ids, dim=0)     # shape [sum(bsz), L], encoder_1_libcell_ids
         self.targets = torch.cat(all_targets, dim=0) # shape [sum(bsz), L2]
-        self.type_ids = torch.cat(all_type_ids, dim=0) # shape [sum(bsz), L2]
-        self.safe_encoder_2 = torch.cat(all_safe_encoder_2, dim=0)
+        self.type_ids = torch.cat(all_type_ids, dim=0) # shape [sum(bsz), L2], encoder_2_input_libcell_type_ids
+        self.safe_encoder_2 = torch.cat(all_safe_encoder_2, dim=0) # shape [sum(bsz), L2], encoder_2_output_avail_libcell_num
 
         # Just to confirm final shapes:
         print(f"Final combined data1 shape: {self.data1.shape}")
-        print(f"Final combined data2 shape: {self.data2.shape}")
+        print(f"Final combined libcell_ids shape: {self.libcell_ids.shape}")
         print(f"Final combined targets shape: {self.targets.shape}")
         print(f"Final combined type_ids shape: {self.type_ids.shape}")
         print(f"Final combined safe_encoder_2 shape: {self.safe_encoder_2.shape}")
@@ -1245,11 +1244,11 @@ class MultiPathDataset(Dataset):
 
     def __getitem__(self, idx):
         """
-        Return a single sample: (data1, data2, target, type_ids, safe_encoder_2).
+        Return a single sample: (data1, libcell_ids, target, type_ids, safe_encoder_2).
         """
         return (
             self.data1[idx],
-            self.data2[idx],
+            self.libcell_ids[idx],
             self.targets[idx],
             self.type_ids[idx],
             self.safe_encoder_2[idx]
@@ -1273,7 +1272,7 @@ def train_multiple_paths(
     # ---------------------------------------------------------------------
     # A) Create model (same as your single-batch code)
     # ---------------------------------------------------------------------
-    D_in = 786   # 768 + 18
+    D_in = 18   # 768 + 18
     D_out = 50   # maximum number of classes
     D_emb = 768
     D_model = 128
@@ -1282,9 +1281,16 @@ def train_multiple_paths(
     num_encoder_layers = 6
     num_encoder_layers_2 = 2
 
+    # Load libcell and libcell type embeddings
+    print("Loading libcell and libcell type embeddings...")
+    libcell_type_embeddings = load_embeddings(os.path.join(base_paths[0], "ASAP7_libcell_type_embeddings.bin"))
+    libcell_embeddings = load_embeddings(os.path.join(base_paths[0], "ASAP7_libcell_embeddings.bin"))
+
     model = TwoEncoderTransformer(
         D_in, D_out, D_emb, D_model, FF_hidden_dim,
-        num_heads, num_encoder_layers, num_encoder_layers_2
+        num_heads, num_encoder_layers, num_encoder_layers_2,
+        libcell_embeddings=libcell_embeddings,
+        libcell_type_embeddings=libcell_type_embeddings
     )
     model.to(device)
     model = torch.compile(model)
@@ -1342,10 +1348,10 @@ def train_multiple_paths(
 
         # Wrap the training dataloader with a tqdm progress bar.
         train_bar = tqdm(dataloader, total=len(dataloader), desc=f"Epoch [{epoch+1}/{num_epochs}]", leave=False)
-        for step, (data1_batch, data2_batch, target_batch, type_ids_batch, safe_encoder_2_batch) in enumerate(train_bar):
+        for step, (data1_batch, libcell_ids_batch, target_batch, type_ids_batch, safe_encoder_2_batch) in enumerate(train_bar):
             # Move data to device
             data1_batch = data1_batch.to(device)
-            data2_batch = data2_batch.to(device)
+            libcell_ids_batch = libcell_ids_batch.to(device)
             target_batch = target_batch.to(device)
             type_ids_batch = type_ids_batch.to(device)
             safe_encoder_2_batch = safe_encoder_2_batch.to(device)
@@ -1353,7 +1359,7 @@ def train_multiple_paths(
             optimizer.zero_grad()
 
             # Forward pass
-            out = model(data1_batch, data2_batch)  # shape [bsz, L2, D_out]
+            out = model(data1_batch, libcell_ids_batch, type_ids_batch)  # shape [bsz, L2, D_out]
 
             # Compute loss
             loss = criterion(out, target_batch, safe_encoder_2_batch)

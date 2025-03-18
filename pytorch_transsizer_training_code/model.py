@@ -232,21 +232,28 @@ class Encoder2Layer(nn.Module):
 
 class TwoEncoderTransformer(nn.Module):
     def __init__(self, 
-                 D_in,       # input feature dim for first encoder
+                 D_in,       # input numeric feature dim for first encoder (excluding libcell embedding) e.g. 18
                  D_out,      # output feature dim (max number of classes)
-                 D_emb,      # embedding size for second input
+                 D_emb,      # embedding size for libcell and libcell_type, e.g. 768
                  D_model,    # main hidden size
                  FF_hidden_dim, 
                  num_heads, 
                  num_encoder_layers, 
-                 num_encoder_layers_2):
+                 num_encoder_layers_2,
+                 libcell_embedding, # torch 2D tensor (libcell_num, D_emb), used to load embeddings to encoder_1 input
+                 libcell_type_embedding # torch 2D tensor (libcell_type_num, D_emb) used to load embeddings to encoder_2 input
+                 ):
         super().__init__()
         self.D_in = D_in
         self.D_emb = D_emb
         self.D_model = D_model
 
+        # Instantiate embeddings
+        self.libcell_embedding_table = nn.Embedding.from_pretrained(libcell_embedding, freeze=True, max_norm=None, padding_idx=0)
+        self.libcell_type_embedding_table = nn.Embedding.from_pretrained(libcell_type_embedding, freeze=True, max_norm=None, padding_idx=0)
+
         # Projection in
-        self.proj_in1 = nn.Linear(D_in, D_model, bias=False)
+        self.proj_in1 = nn.Linear(D_in + D_emb, D_model, bias=False)
         self.proj_in2 = nn.Linear(D_emb, D_model, bias=False)
         # final out
         self.proj_out = nn.Linear(D_model, D_out, bias=False)
@@ -263,12 +270,26 @@ class TwoEncoderTransformer(nn.Module):
             for _ in range(num_encoder_layers_2)
         ])
 
-    def forward(self, data1, data2):
+    def forward(self, encoder_1_numeric_data, encoder_1_libcell_ids, encoder_2_libcell_type_ids):
         """
-        data1: shape [bsz, L, D_in]
-        data2: shape [bsz, L2, D_emb]
+        encoder_1_numeric_data: shape [bsz, L, D_in], dtype: torch.float32
+        encoder_1_libcell_ids: shape [bsz, L], dtype: torch.int64
+        encoder_2_libcell_type_ids: shape [bsz, L2], dtype: torch.int64
         returns: [bsz, L2, D_out]
         """
+
+        # Embedding lookup, if -1 is found in libcell_ids, it will be replaced with 0 so that padding_idx is used
+        encoder_1_libcell_id_mask = (encoder_1_libcell_ids == -1)
+        encoder_1_libcell_ids = encoder_1_libcell_ids.masked_fill(encoder_1_libcell_id_mask, 0)
+        libcell_emb = self.libcell_embedding_table(encoder_1_libcell_ids)
+        data1 = torch.cat([encoder_1_numeric_data, libcell_emb], dim=-1)  # => [bsz, L, D_in + D_emb]
+
+        encoder_2_libcell_type_id_mask = (encoder_2_libcell_type_ids == -1)
+        encoder_2_libcell_type_ids = encoder_2_libcell_type_ids.masked_fill(encoder_2_libcell_type_id_mask, 0)
+        libcell_type_emb = self.libcell_type_embedding_table(encoder_2_libcell_type_ids)
+        data2 = libcell_type_emb  # => [bsz, L2, D_emb]
+
+
         # First encoder
         x1 = self.proj_in1(data1)  # => [bsz, L, D_model]
         for layer in self.encoders1:
