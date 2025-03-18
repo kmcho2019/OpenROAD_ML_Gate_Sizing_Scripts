@@ -7,6 +7,8 @@ import numpy as np
 from torch.utils.data import TensorDataset, Dataset, DataLoader
 from model import TwoEncoderTransformer, export_model_weights_robust
 
+from tqdm.auto import tqdm
+
 def load_embeddings(filename):
     with open(filename, 'rb') as f:
         # Read N and D
@@ -14,11 +16,11 @@ def load_embeddings(filename):
         D = int.from_bytes(f.read(8), byteorder='little')
 
         arr = np.frombuffer(f.read(), dtype=np.float32).reshape(N, D)
-        
+
         # Read the embeddings tensor
         #embeddings = torch.from_numpy(np.frombuffer(f.read(), dtype=np.float32).reshape(N, D))
         return torch.from_numpy(arr.copy())
-    
+
 def load_3d_tensor(filename):
     """Load 3D float tensor from binary file (shape [N, L, D])"""
     with open(filename, 'rb') as f:
@@ -35,7 +37,7 @@ def load_2d_int_tensor(filename):
         C = int.from_bytes(f.read(8), 'little')
         arr = np.frombuffer(f.read(), dtype=np.int32).reshape(R, C)
         return torch.from_numpy(arr.copy())
-    
+
 
 # -----------------------------------------------------------------------------
 # Custom Dataset for TransSizer
@@ -122,21 +124,21 @@ def create_train_val_dataloaders(train_dirs, val_dirs,
     """
     Given a base directory for training designs and another for validation designs,
     this function collects the individual design directories and creates DataLoaders.
-    
+
     Args:
         train_dirs (list): List containing training design folders.
         val_dirs (list): List containing validation design folders.
         batch_size (int): Batch size (each sample is a design).
         shuffle (bool): Whether to shuffle the training designs.
         num_workers (int): Number of worker threads for data loading.
-    
+
     Returns:
         train_loader, val_loader: Two DataLoaders for training and validation.
     """
     # List all subdirectories (designs) in the provided base paths
     #train_design_dirs = [os.path.join(train_base_dir, d) for d in os.listdir(train_base_dir) if os.path.isdir(os.path.join(train_base_dir, d))]
     #val_design_dirs = [os.path.join(val_base_dir, d) for d in os.listdir(val_base_dir) if os.path.isdir(os.path.join(val_base_dir, d))]
-    
+
     train_loader = create_dataloader(train_dirs,
                                      batch_size=batch_size,
                                      shuffle=shuffle,
@@ -155,7 +157,7 @@ def train_model(train_loader, val_loader, num_epochs=5, warmup_ratio=0.1, device
     # -------------------------------------------------------------------------
     # 1. Model Configuration (using your hyper-parameters)
     # -------------------------------------------------------------------------
-    D_in = 786   # e.g., 768 + 18 
+    D_in = 786   # e.g., 768 + 18
     D_out = 50   # maximum number of classes
     D_emb = 768
     D_model = 128
@@ -187,7 +189,7 @@ def train_model(train_loader, val_loader, num_epochs=5, warmup_ratio=0.1, device
         else:
             progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
             return max(0.0, 1.0 - progress)
-    
+
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
     global_step = 0
@@ -280,7 +282,7 @@ def train_model(train_loader, val_loader, num_epochs=5, warmup_ratio=0.1, device
 
 def example_train():
     # Hyperparams (example)
-    D_in = 786 # 768 + 18  #17 
+    D_in = 786 # 768 + 18  #17
     D_out = 50 # maximum number of classes
     D_emb = 768
     D_model = 128
@@ -293,7 +295,7 @@ def example_train():
     model = TwoEncoderTransformer(D_in, D_out, D_emb, D_model, FF_hidden_dim, num_heads,
                                   num_encoder_layers, num_encoder_layers_2)
     model.train()
-    
+
     # Dummy data: (batch_size=4, L=8, D_in=17)
     # and second input (batch_size=4, L2=4, D_emb=768)
     # L2 = L//2 in your scheme
@@ -311,7 +313,7 @@ def example_train():
     # Load data2: Process 2D IDs to 3D embeddings
     type_ids = load_2d_int_tensor("encoder_2_input_libcell_type_ids.bin")
     type_embeddings = load_embeddings("ASAP7_libcell_type_embeddings.bin")
-    
+
     # Convert IDs to embeddings with -1 handling
     mask = (type_ids == -1)
     safe_ids = type_ids.clone()
@@ -365,18 +367,18 @@ def example_train():
 def example_train_2(num_epochs=5, warmup_ratio=0.1):
     """
     Trains the TwoEncoderTransformer model for 'num_epochs' epochs.
-    
+
     Args:
         num_epochs (int): Number of epochs to train for.
         warmup_ratio (float): Fraction of total steps used for linear warmup.
-    
+
     Returns:
         model: Trained model.
     """
     # -------------------------------------------------------------------------
     # 1. Model Configuration
     # -------------------------------------------------------------------------
-    D_in = 786   # 768 + 18 
+    D_in = 786   # 768 + 18
     D_out = 50   # maximum number of classes
     D_emb = 768
     D_model = 128
@@ -418,7 +420,7 @@ def example_train_2(num_epochs=5, warmup_ratio=0.1):
 
     # Print the share of padding tokens in data2
     print(f"Share of padding tokens in data2: {mask.float().mean().item():.2f}")
-    # Average number of padding tokens 
+    # Average number of padding tokens
     print(f"Average number of padding tokens per batch: {mask.sum(dim=1).float().mean().item():.2f}")
 
     # -------------------------------------------------------------------------
@@ -538,7 +540,7 @@ def example_train_3(
     # 2. Data Loading
     # -------------------------------------------------------------------------
     # Load data1: shape [N, L, D_in]
-    data1 = load_3d_tensor("data_array.bin") 
+    data1 = load_3d_tensor("data_array.bin")
     N, L, D_in_check = data1.shape
     assert D_in_check == D_in, f"Expected D_in={D_in}, got {D_in_check}"
 
@@ -566,7 +568,7 @@ def example_train_3(
 
     # Print the share of padding tokens in data2
     print(f"Share of padding tokens in data2: {mask.float().mean().item():.2f}")
-    # Average number of padding tokens 
+    # Average number of padding tokens
     print(f"Average number of padding tokens per batch: {mask.sum(dim=1).float().mean().item():.2f}")
 
 
@@ -632,7 +634,7 @@ def example_train_3(
             # ---------------------------------------------------
             preds = out.argmax(dim=1)
             valid_mask = (batch_target != -1)
-            
+
             # Flatten everything for counting if you prefer
             valid_preds = preds[valid_mask]          # Only valid positions
             valid_labels = batch_target[valid_mask]  # Exclude padding
@@ -863,7 +865,7 @@ class CustomCrossEntropyLoss_draft0(nn.Module):
         # Compute loss using the standard CrossEntropyLoss
         loss = self.criterion(masked_logits.view(-1, D_out), targets.view(-1))
         return loss
-    
+
 class CustomCrossEntropyLoss(nn.Module):
     def __init__(self):
         super().__init__()
@@ -887,7 +889,7 @@ class CustomCrossEntropyLoss(nn.Module):
         # print(f"available_k[0, 0]: {available_k[0, 0]}")
 
 
-        
+
         # 1. Mask logits beyond available_k
         indices = torch.arange(D_out, device=logits.device).view(1, 1, D_out)
         available_k_expanded = available_k.unsqueeze(-1)  # [bsz, L2, 1]
@@ -908,7 +910,7 @@ class CustomCrossEntropyLoss(nn.Module):
         # print(f"mask[0, 0]: {mask[0, 0]}")
         # print(f"masked_logits[0, 0]: {masked_logits[0, 0]}")
 
-        
+
         # 2. Compute valid positions (available_k > 0 and target < available_k)
         valid_mask = (available_k > 0) & (targets < available_k)  # [bsz, L2]
 
@@ -917,7 +919,7 @@ class CustomCrossEntropyLoss(nn.Module):
 
         # # Print example values
         # print(f"valid_mask[0, 0]: {valid_mask[0, 0]}")
-        
+
         # 3. Compute log softmax and gather target log probabilities
         log_probs = torch.nn.functional.log_softmax(masked_logits, dim=-1)
 
@@ -934,7 +936,7 @@ class CustomCrossEntropyLoss(nn.Module):
 
         # # Print example values
         # print(f"nll_loss[0, 0]: {nll_loss[0, 0]}")
-        
+
         # 4. Mask out invalid positions and compute mean loss
 
         # # Print shapes
@@ -949,7 +951,7 @@ class CustomCrossEntropyLoss(nn.Module):
 
         nll_loss = nll_loss * valid_mask.float()
 
-        # # Print shapes 
+        # # Print shapes
         # print(f"nll_loss.shape: {nll_loss.shape}")
 
         # # Print example values
@@ -999,24 +1001,24 @@ class CustomCrossEntropyLoss(nn.Module):
         # # Print final loss
         # print(f"loss: {loss.item()}")
 
-        
+
         return loss
 
 def example_train_5(base_path="./", num_epochs=5, warmup_ratio=0.1):
     """
     Trains the TwoEncoderTransformer model for 'num_epochs' epochs.
-    
+
     Args:
         num_epochs (int): Number of epochs to train for.
         warmup_ratio (float): Fraction of total steps used for linear warmup.
-    
+
     Returns:
         model: Trained model.
     """
     # -------------------------------------------------------------------------
     # 1. Model Configuration
     # -------------------------------------------------------------------------
-    D_in = 786   # 768 + 18 
+    D_in = 786   # 768 + 18
     D_out = 50   # maximum number of classes
     D_emb = 768
     D_model = 128
@@ -1061,7 +1063,7 @@ def example_train_5(base_path="./", num_epochs=5, warmup_ratio=0.1):
 
     # Print the share of padding tokens in data2
     print(f"Share of padding tokens in data2: {mask.float().mean().item():.2f}")
-    # Average number of padding tokens 
+    # Average number of padding tokens
     print(f"Average number of padding tokens per batch: {mask.sum(dim=1).float().mean().item():.2f}")
 
     # -------------------------------------------------------------------------
@@ -1171,7 +1173,7 @@ class MultiPathDataset(Dataset):
         #   type_embeddings = load_embeddings(os.path.join(base_paths[0], "ASAP7_libcell_type_embeddings.bin"))
         # If each base_path has the same embedding, you can do this once outside the loop.
         # If each base_path has different embeddings, adjust accordingly.
-        
+
         # Just load from the first base_path for demonstration:
         first_path = base_paths[0]
         embedding_file = os.path.join(first_path, "ASAP7_libcell_type_embeddings.bin")
@@ -1191,7 +1193,7 @@ class MultiPathDataset(Dataset):
             # -------------------------
             type_ids_path = os.path.join(bp, "encoder_2_input_libcell_type_ids.bin")
             type_ids = load_2d_int_tensor(type_ids_path).long()  # shape [bsz, L2]
-            
+
             # -------------------------
             # safe_encoder_2_output_avail_libcell_num
             # -------------------------
@@ -1218,6 +1220,10 @@ class MultiPathDataset(Dataset):
             all_type_ids.append(type_ids)
             all_safe_encoder_2.append(safe_encoder_2)
 
+            # Print the shapes of data1, data2, targets, type_ids, and safe_encoder_2
+            print(f"Data1 shape: {data1.shape}, Data2 shape: {data2.shape}, Target shape: {target.shape}")
+            print(f"Type IDs shape: {type_ids.shape}, Safe Encoder 2 shape: {safe_encoder_2.shape}\n")
+
         # ----------------------------------------------------
         # Concatenate along dimension=0 (the batch dimension)
         # ----------------------------------------------------
@@ -1242,9 +1248,9 @@ class MultiPathDataset(Dataset):
         Return a single sample: (data1, data2, target, type_ids, safe_encoder_2).
         """
         return (
-            self.data1[idx], 
-            self.data2[idx], 
-            self.targets[idx], 
+            self.data1[idx],
+            self.data2[idx],
+            self.targets[idx],
             self.type_ids[idx],
             self.safe_encoder_2[idx]
         )
@@ -1254,10 +1260,10 @@ class MultiPathDataset(Dataset):
 # -------------------------------------------------------------------------
 def train_multiple_paths(
     base_paths,
-    val_paths=None, 
-    num_epochs=5, 
-    warmup_ratio=0.1, 
-    batch_size=2, 
+    val_paths=None,
+    num_epochs=5,
+    warmup_ratio=0.1,
+    batch_size=2,
     shuffle=True,
     device="cpu"
 ):
@@ -1267,7 +1273,7 @@ def train_multiple_paths(
     # ---------------------------------------------------------------------
     # A) Create model (same as your single-batch code)
     # ---------------------------------------------------------------------
-    D_in = 786   # 768 + 18 
+    D_in = 786   # 768 + 18
     D_out = 50   # maximum number of classes
     D_emb = 768
     D_model = 128
@@ -1281,6 +1287,7 @@ def train_multiple_paths(
         num_heads, num_encoder_layers, num_encoder_layers_2
     )
     model.to(device)
+    model = torch.compile(model)
     model.train()
 
     # ---------------------------------------------------------------------
@@ -1319,7 +1326,7 @@ def train_multiple_paths(
             return max(0.0, 1.0 - progress)
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-
+    print("Training started.")
     # ---------------------------------------------------------------------
     # E) Training Loop
     # ---------------------------------------------------------------------
@@ -1333,22 +1340,23 @@ def train_multiple_paths(
         epoch_padding_excluded_correct = 0
         epoch_padding_excluded_total = 0
 
-
-        for step, (data1_batch, data2_batch, target_batch, type_ids_batch, safe_encoder_2_batch) in enumerate(dataloader):
+        # Wrap the training dataloader with a tqdm progress bar.
+        train_bar = tqdm(dataloader, total=len(dataloader), desc=f"Epoch [{epoch+1}/{num_epochs}]", leave=False)
+        for step, (data1_batch, data2_batch, target_batch, type_ids_batch, safe_encoder_2_batch) in enumerate(train_bar):
             # Move data to device
             data1_batch = data1_batch.to(device)
             data2_batch = data2_batch.to(device)
             target_batch = target_batch.to(device)
             type_ids_batch = type_ids_batch.to(device)
             safe_encoder_2_batch = safe_encoder_2_batch.to(device)
-            
+
             optimizer.zero_grad()
 
             # Forward pass
             out = model(data1_batch, data2_batch)  # shape [bsz, L2, D_out]
 
             # Compute loss
-            loss = criterion(out, target_batch, safe_encoder_2_batch)  
+            loss = criterion(out, target_batch, safe_encoder_2_batch)
             loss.backward()
             optimizer.step()
             scheduler.step()   # Update LR per-step
@@ -1359,8 +1367,8 @@ def train_multiple_paths(
             # -----------------------------------------------------------------
             # Accuracy (including or excluding padding)
             # If you still need the mask, note that you no longer have 'type_ids'
-            # in this mini-batch directly unless you store them. For a "valid" 
-            # accuracy you might need to store the original mask. 
+            # in this mini-batch directly unless you store them. For a "valid"
+            # accuracy you might need to store the original mask.
             #
             # For demonstration, let's do naive accuracy:
             # -----------------------------------------------------------------
@@ -1378,6 +1386,9 @@ def train_multiple_paths(
             epoch_padding_excluded_correct += valid_correct
             epoch_padding_excluded_total += valid_total
 
+            # Update progress bar with current loss and learning rate
+            train_bar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{scheduler.get_last_lr()[0]:.6f}")
+
 
 
         # Print epoch summary
@@ -1392,7 +1403,7 @@ def train_multiple_paths(
             f"LR={scheduler.get_last_lr()[0]:.6f} | "
             f"Loss={avg_epoch_loss:.4f} | "
             f"Acc={epoch_acc*100:.2f}% | "
-            f"Valid Acc={epoch_padding_excluded_acc*100:.2f}%"  # Accuracy excluding padding tokens 
+            f"Valid Acc={epoch_padding_excluded_acc*100:.2f}%"  # Accuracy excluding padding tokens
         )
         # Validation loop (if provided)
         if val_dataloader:
@@ -1452,27 +1463,29 @@ if __name__ == "__main__":
     # Added loading encoder_2_output_avail_libcell_num from example_train_5 onwards
     # This masks out libcell's that exceed the maximum number of available libcells for that particular libcell type
     #trained_model = example_train_5(base_path= "./NV_NVDLA_partition_m", num_epochs=1, warmup_ratio=0.2)
+    torch.set_float32_matmul_precision('high')
 
-    train_base_dir = ["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256", "./train_data/mempool_tile_wrap"]
+    train_base_dir = ["./train_data/NV_NVDLA_partition_m"]
+#["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#,"./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#, "./train_data/mempool_tile_wrap"]
     val_base_dir = ["./train_data/NV_NVDLA_partition_m"]
     trained_model = train_multiple_paths(
         base_paths=train_base_dir,
         val_paths=val_base_dir,
-        num_epochs=20,
+        num_epochs=200,#200,#2,
         warmup_ratio=0.2,
-        batch_size=256,
+        batch_size=512,
         shuffle=True,
-        device="cuda:2"
+        device="cuda:0"
     )
 
     """
     # Create Dataloaders
     train_loader, val_loader = create_train_val_dataloaders(
-        train_base_dir, val_base_dir, 
+        train_base_dir, val_base_dir,
         batch_size=16,
         shuffle=True,
         num_workers=0)
-    
+
     device =  "cuda" if torch.cuda.is_available() else "cpu"
 
     trained_model = train_model(
