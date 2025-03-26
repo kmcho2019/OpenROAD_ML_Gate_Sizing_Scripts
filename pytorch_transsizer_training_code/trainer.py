@@ -1289,8 +1289,8 @@ def train_multiple_paths(
     model = TwoEncoderTransformer(
         D_in, D_out, D_emb, D_model, FF_hidden_dim,
         num_heads, num_encoder_layers, num_encoder_layers_2,
-        libcell_embeddings=libcell_embeddings,
-        libcell_type_embeddings=libcell_type_embeddings
+        libcell_embedding=libcell_embeddings,
+        libcell_type_embedding=libcell_type_embeddings
     )
     model.to(device)
     model = torch.compile(model)
@@ -1421,14 +1421,14 @@ def train_multiple_paths(
             val_padding_excluded_total = 0
             with torch.no_grad():
 
-                for val_data1, val_data2, val_target, val_type_ids, val_safe_encoder_2 in val_dataloader:
+                for val_data1, val_data1_libcell_id, val_target, val_type_ids, val_safe_encoder_2 in val_dataloader:
                     val_data1 = val_data1.to(device)
-                    val_data2 = val_data2.to(device)
+                    val_data1_libcell_id = val_data1_libcell_id.to(device)
                     val_target = val_target.to(device)
                     val_type_ids = val_type_ids.to(device)
                     val_safe_encoder_2 = val_safe_encoder_2.to(device)
 
-                    val_out = model(val_data1, val_data2)
+                    val_out = model(val_data1, val_data1_libcell_id, val_type_ids)
                     val_loss = criterion(val_out, val_target, val_safe_encoder_2)
 
                     val_loss_total += val_loss.item()
@@ -1471,9 +1471,9 @@ if __name__ == "__main__":
     #trained_model = example_train_5(base_path= "./NV_NVDLA_partition_m", num_epochs=1, warmup_ratio=0.2)
     torch.set_float32_matmul_precision('high')
 
-    train_base_dir = ["./train_data/NV_NVDLA_partition_m"]
+    train_base_dir = [".//NV_NVDLA_partition_p"]#["./train_data/NV_NVDLA_partition_m"]
 #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#,"./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#, "./train_data/mempool_tile_wrap"]
-    val_base_dir = ["./train_data/NV_NVDLA_partition_m"]
+    val_base_dir = ["./NV_NVDLA_partition_p"]#["./train_data/NV_NVDLA_partition_m"]
     trained_model = train_multiple_paths(
         base_paths=train_base_dir,
         val_paths=val_base_dir,
