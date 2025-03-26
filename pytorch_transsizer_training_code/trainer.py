@@ -1340,8 +1340,6 @@ def train_multiple_paths(
     for epoch in range(num_epochs):
         # Optionally track epoch-level metrics
         epoch_loss = 0.0
-        epoch_correct = 0
-        epoch_total = 0
 
         epoch_padding_excluded_correct = 0
         epoch_padding_excluded_total = 0
@@ -1371,21 +1369,14 @@ def train_multiple_paths(
             epoch_loss += loss.item()
 
             # -----------------------------------------------------------------
-            # Accuracy (including or excluding padding)
-            # If you still need the mask, note that you no longer have 'type_ids'
-            # in this mini-batch directly unless you store them. For a "valid"
-            # accuracy you might need to store the original mask.
-            #
-            # For demonstration, let's do naive accuracy:
+            # Accuracy (excluding padding)
+            # The padding tokens at end of each sequence are excluded from accuracy calculation
+            # They can be identified as the type_ids == -1 for the second encoder
             # -----------------------------------------------------------------
             preds = out.argmax(dim=2)  # shape [bsz, L2]
-            correct = (preds == target_batch).sum().item()
-            total = target_batch.numel()
-            epoch_correct += correct
-            epoch_total   += total
 
             # Use type_ids to compute accuracy excluding padding tokens
-            mask = (type_ids_batch != -1)
+            mask = (type_ids_batch != -1) # Shape: [bsz, L2], valid positions
             valid_correct = (preds[mask] == target_batch[mask]).sum().item()
             valid_total = mask.sum().item()
             valid_accuracy = valid_correct / valid_total if valid_total > 0 else 0.0
@@ -1398,7 +1389,6 @@ def train_multiple_paths(
 
 
         # Print epoch summary
-        epoch_acc = epoch_correct / epoch_total if epoch_total > 0 else 0.0
         epoch_padding_excluded_acc = epoch_padding_excluded_correct / epoch_padding_excluded_total if epoch_padding_excluded_total > 0 else 0.0
         avg_epoch_loss = epoch_loss / len(dataloader)
 
@@ -1408,15 +1398,12 @@ def train_multiple_paths(
             f"Global Step={global_step} | "
             f"LR={scheduler.get_last_lr()[0]:.6f} | "
             f"Loss={avg_epoch_loss:.4f} | "
-            f"Acc={epoch_acc*100:.2f}% | "
             f"Valid Acc={epoch_padding_excluded_acc*100:.2f}%"  # Accuracy excluding padding tokens
         )
         # Validation loop (if provided)
         if val_dataloader:
             model.eval()
             val_loss_total = 0.0
-            val_correct = 0
-            val_total = 0
             val_padding_excluded_correct = 0
             val_padding_excluded_total = 0
             with torch.no_grad():
@@ -1434,8 +1421,6 @@ def train_multiple_paths(
                     val_loss_total += val_loss.item()
 
                     val_preds = val_out.argmax(dim=2)
-                    val_correct += (val_preds == val_target).sum().item()
-                    val_total += val_target.numel()
 
                     val_mask = (val_type_ids != -1)
                     val_valid_correct = (val_preds[val_mask] == val_target[val_mask]).sum().item()
@@ -1443,14 +1428,12 @@ def train_multiple_paths(
                     val_padding_excluded_correct += val_valid_correct
                     val_padding_excluded_total += val_valid_total
             # Compute validation metrics
-            val_acc = val_correct / val_total if val_total > 0 else 0.0
             val_padding_excluded_acc = val_padding_excluded_correct / val_padding_excluded_total if val_padding_excluded_total > 0 else 0.0
             avg_val_loss = val_loss_total / len(val_dataloader)
             # Print validation metrics
             print(
                 f"Validation | "
                 f"Loss={avg_val_loss:.4f} | "
-                f"Acc={val_acc*100:.2f}% | "
                 f"Valid Acc={val_padding_excluded_acc*100:.2f}%"  # Accuracy excluding padding tokens
             )
             model.train() # Set back to train mode
@@ -1471,9 +1454,9 @@ if __name__ == "__main__":
     #trained_model = example_train_5(base_path= "./NV_NVDLA_partition_m", num_epochs=1, warmup_ratio=0.2)
     torch.set_float32_matmul_precision('high')
 
-    train_base_dir = [".//NV_NVDLA_partition_p"]#["./train_data/NV_NVDLA_partition_m"]
+    train_base_dir = ["./NV_NVDLA_partition_p", "./ariane136"]#["./train_data/NV_NVDLA_partition_m"]
 #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#,"./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#, "./train_data/mempool_tile_wrap"]
-    val_base_dir = ["./NV_NVDLA_partition_p"]#["./train_data/NV_NVDLA_partition_m"]
+    val_base_dir = ["./aes_256"]#["./train_data/NV_NVDLA_partition_m"]
     trained_model = train_multiple_paths(
         base_paths=train_base_dir,
         val_paths=val_base_dir,
