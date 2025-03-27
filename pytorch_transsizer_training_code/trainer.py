@@ -1297,6 +1297,13 @@ class MultiPathDataset(Dataset):
                 max_len_enc2 = seq_lengths_enc2.max().item()
                 print(f"Average, Minimum, Maximum input sequence length of encoder 2 (padding tokens excluded): {avg_len_enc2:.2f}, {min_len_enc2}, {max_len_enc2}")
 
+                # Also keep track of average, minimum, maximum safe_encoder_2 values (for non-padding tokens)
+                avg_avail_libcell_num = safe_encoder_2[valid_type_ids_mask].float().mean().item()
+                min_avail_libcell_num = safe_encoder_2[valid_type_ids_mask].min().item()
+                max_avail_libcell_num = safe_encoder_2[valid_type_ids_mask].max().item()
+                print(f"Average, Minimum, Maximum safe_encoder_2 values (for non-padding tokens): {avg_avail_libcell_num:.2f}, {min_avail_libcell_num}, {max_avail_libcell_num}")
+
+
                 # --- Generate and Save Histogram for Encoder 1 Sequence Lengths ---
                 if seq_lengths_enc1.numel() > 0: # Only plot if there's data
                     plt.figure(figsize=(10, 6))
@@ -1372,7 +1379,7 @@ class MultiPathDataset(Dataset):
 
         pad_value_float = 0.0
         pad_value_int = -1 # Use -1 for padding integer IDs, matching mask logic
-        pad_value_target = 0 # Use 0 for padding target labels
+        pad_value_target = 0 # Use 0 for padding target labels and safe_encoder_2(avail_libcell_num)
 
         for i in range(len(all_data1)):
             # Pad tensors related to L
@@ -1396,7 +1403,7 @@ class MultiPathDataset(Dataset):
                 # For type_ids, targets, safe_encoder_2 (B, L2), pad L2 (dim 1): needs (0, pad_amount_L2 for L2)
                 padded_type_ids.append(F.pad(all_type_ids[i], (0, pad_amount_L2), mode='constant', value=pad_value_int))
                 padded_targets.append(F.pad(all_targets[i], (0, pad_amount_L2), mode='constant', value=pad_value_target))
-                padded_safe_encoder_2.append(F.pad(all_safe_encoder_2[i], (0, pad_amount_L2), mode='constant', value=pad_value_int))
+                padded_safe_encoder_2.append(F.pad(all_safe_encoder_2[i], (0, pad_amount_L2), mode='constant', value=pad_value_target))
             else: # No padding needed
                 padded_type_ids.append(all_type_ids[i])
                 padded_targets.append(all_targets[i])
