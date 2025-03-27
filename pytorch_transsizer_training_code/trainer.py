@@ -9,6 +9,8 @@ from model import TwoEncoderTransformer, export_model_weights_robust
 
 from tqdm.auto import tqdm
 
+import matplotlib.pyplot as plt
+
 def load_embeddings(filename):
     with open(filename, 'rb') as f:
         # Read N and D
@@ -1221,7 +1223,89 @@ class MultiPathDataset(Dataset):
 
             # Print the shapes of data1, data2, targets, type_ids, and safe_encoder_2
             print(f"Data1 shape: {data1.shape}, Libcell IDs shape: {libcell_ids.shape}, Target shape: {target.shape}")
-            print(f"Type IDs shape: {type_ids.shape}, Safe Encoder 2 shape: {safe_encoder_2.shape}\n")
+            print(f"Type IDs shape: {type_ids.shape}, Safe Encoder 2 shape: {safe_encoder_2.shape}")
+
+            # Try to check the statistics of the input data, especially the padding tokens
+            valid_data1_mask = (data1 != 0.0)
+            valid_libcell_ids_mask = (libcell_ids != -1)
+            valid_type_ids_mask = (type_ids != -1)
+            valid_target_mask = (target != 0.0)
+
+            # Pre-calculate padding masks (logical NOT of valid masks)
+            padding_data1_mask = ~valid_data1_mask
+            padding_libcell_ids_mask = ~valid_libcell_ids_mask
+            padding_type_ids_mask = ~valid_type_ids_mask
+            padding_target_mask = ~valid_target_mask
+
+            # Calculate counts and totals once
+            num_padding_data1 = padding_data1_mask.sum()
+            total_data1 = data1.numel()
+
+            num_padding_libcell = padding_libcell_ids_mask.sum()
+            total_libcell = libcell_ids.numel()
+
+            num_padding_type = padding_type_ids_mask.sum()
+            total_type = type_ids.numel()
+
+            num_padding_target = padding_target_mask.sum()
+            total_target = target.numel()
+
+            # Print share information using pre-calculated values
+            print(f"Share of padding tokens in data1 (encoder_1 input): {(num_padding_data1 / total_data1).item():.2f} ({num_padding_data1} / {total_data1})")
+            print(f"Share of padding tokens in libcell_ids (encoder_1 input): {(num_padding_libcell / total_libcell).item():.2f} ({num_padding_libcell} / {total_libcell})")
+            print(f"Share of padding tokens in type_ids (encoder_2 input): {(num_padding_type / total_type).item():.2f} ({num_padding_type} / {total_type})")
+            print(f"Share of padding tokens in target (encoder_2 output): {(num_padding_target / total_target).item():.2f} ({num_padding_target} / {total_target})") # Using consistent padding count
+
+            # Calculate sequence lengths (sum of valid tokens per sequence)
+            seq_lengths_enc1 = valid_libcell_ids_mask.sum(dim=1).float()
+            seq_lengths_enc2 = valid_type_ids_mask.sum(dim=1).float()
+
+            # Calculate and print sequence length stats
+            avg_len_enc1 = seq_lengths_enc1.mean().item()
+            min_len_enc1 = seq_lengths_enc1.min().item()
+            max_len_enc1 = seq_lengths_enc1.max().item()
+            print(f"Average, Minimum, Maximum input sequence length of encoder 1 (padding tokens excluded): {avg_len_enc1:.2f}, {min_len_enc1}, {max_len_enc1}")
+
+            avg_len_enc2 = seq_lengths_enc2.mean().item()
+            min_len_enc2 = seq_lengths_enc2.min().item()
+            max_len_enc2 = seq_lengths_enc2.max().item()
+            print(f"Average, Minimum, Maximum input sequence length of encoder 2 (padding tokens excluded): {avg_len_enc2:.2f}, {min_len_enc2}, {max_len_enc2}\n")
+
+            # --- Generate and Save Histogram for Encoder 1 Sequence Lengths ---
+            if seq_lengths_enc1.numel() > 0: # Only plot if there's data
+                plt.figure(figsize=(10, 6))
+                # Convert tensor to numpy array for matplotlib
+                lengths_np = seq_lengths_enc1.cpu().numpy()
+                plt.hist(lengths_np, bins=min(50, int(max_len_enc1 - min_len_enc1 + 1)), edgecolor='black') # Adjust bins as needed
+
+                plt.title(f'Encoder 1 Valid Sequence Length Distribution\n(Base Path: {os.path.basename(bp)})')
+                plt.xlabel('Valid Sequence Length (from libcell_ids != -1)')
+                plt.ylabel('Frequency (Number of Sequences)')
+
+                # Prepare statistics text
+                stats_text = f'Average: {avg_len_enc1:.2f}\nMinimum: {min_len_enc1}\nMaximum: {max_len_enc1}'
+
+                # Add text box with statistics to the plot
+                # Adjust x, y coordinates (0 to 1 relative to axes) and alignment as needed
+                plt.text(0.95, 0.95, stats_text, transform=plt.gca().transAxes, fontsize=10,
+                        verticalalignment='top', horizontalalignment='right',
+                        bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.5))
+
+                plt.grid(axis='y', alpha=0.75)
+
+                # Define save path and save the figure
+                hist_filename = "encoder1_valid_seq_len_histogram.png"
+                save_path = os.path.join(bp, hist_filename)
+                try:
+                    plt.savefig(save_path, bbox_inches='tight')
+                    print(f"Histogram saved to: {save_path}")
+                except Exception as e:
+                    print(f"Error saving histogram to {save_path}: {e}")
+
+                # Close the plot to free memory
+                plt.close()
+            else:
+                print("Skipping histogram generation for Encoder 1: No sequence length data found.")
 
         # ----------------------------------------------------
         # Concatenate along dimension=0 (the batch dimension)
@@ -1238,6 +1322,8 @@ class MultiPathDataset(Dataset):
         print(f"Final combined targets shape: {self.targets.shape}")
         print(f"Final combined type_ids shape: {self.type_ids.shape}")
         print(f"Final combined safe_encoder_2 shape: {self.safe_encoder_2.shape}")
+
+        
 
     def __len__(self):
         return self.data1.size(0)  # total number of "samples" across all base_paths
@@ -1398,7 +1484,7 @@ def train_multiple_paths(
             f"Global Step={global_step} | "
             f"LR={scheduler.get_last_lr()[0]:.6f} | "
             f"Loss={avg_epoch_loss:.4f} | "
-            f"Valid Acc={epoch_padding_excluded_acc*100:.2f}%"  # Accuracy excluding padding tokens
+            f"Accuracy={epoch_padding_excluded_acc*100:.2f}%"  # Accuracy excluding padding tokens
         )
         # Validation loop (if provided)
         if val_dataloader:
@@ -1434,7 +1520,7 @@ def train_multiple_paths(
             print(
                 f"Validation | "
                 f"Loss={avg_val_loss:.4f} | "
-                f"Valid Acc={val_padding_excluded_acc*100:.2f}%"  # Accuracy excluding padding tokens
+                f"Accuracy={val_padding_excluded_acc*100:.2f}%"  # Accuracy excluding padding tokens
             )
             model.train() # Set back to train mode
 
@@ -1454,9 +1540,9 @@ if __name__ == "__main__":
     #trained_model = example_train_5(base_path= "./NV_NVDLA_partition_m", num_epochs=1, warmup_ratio=0.2)
     torch.set_float32_matmul_precision('high')
 
-    train_base_dir = ["./NV_NVDLA_partition_p", "./ariane136"]#["./train_data/NV_NVDLA_partition_m"]
+    train_base_dir = ["./NV_NVDLA_partition_p", "./ariane136", "./aes_256", "./NV_NVDLA_partition_m", "./mempool_tile_wrap"]#["./train_data/NV_NVDLA_partition_m"]
 #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#,"./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#, "./train_data/mempool_tile_wrap"]
-    val_base_dir = ["./aes_256"]#["./train_data/NV_NVDLA_partition_m"]
+    val_base_dir = ["./mempool_tile_wrap"]#["./train_data/NV_NVDLA_partition_m"]
     trained_model = train_multiple_paths(
         base_paths=train_base_dir,
         val_paths=val_base_dir,
