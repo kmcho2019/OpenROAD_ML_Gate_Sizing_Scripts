@@ -5,11 +5,13 @@ import os
 import numpy as np
 
 from torch.utils.data import TensorDataset, Dataset, DataLoader
-from model import TwoEncoderTransformer, export_model_weights_robust
+from model import TwoEncoderTransformer, export_model_weights_robust, test_attention_masking, test_two_encoder_transformer_masking
 
 from tqdm.auto import tqdm
 
 import matplotlib.pyplot as plt
+
+import torch.nn.functional as F
 
 def load_embeddings(filename):
     with open(filename, 'rb') as f:
@@ -1182,141 +1184,236 @@ class MultiPathDataset(Dataset):
         print(f"Loading type embeddings from: {embedding_file}")
         self.type_embeddings = load_embeddings(embedding_file)  # shape [num_types, D_emb]
 
+
+        # --- Load data from each path and store temporarily ---
         for bp in base_paths:
-            print(f"Loading data from base_path={bp}")
-            # -------------------------
-            # data1: 3D float tensor
-            # -------------------------
-            data1_path = os.path.join(bp, "data_array.bin")
-            data1 = load_3d_tensor(data1_path)  # shape [bsz, L, D_in]
+            print(f"\nLoading data from base_path={bp}:")
+            try: 
+                # Load data
+                # -------------------------
+                # data1: 3D float tensor
+                # -------------------------
+                data1_path = os.path.join(bp, "data_array.bin")
+                data1 = load_3d_tensor(data1_path)  # shape [bsz, L, D_in]
 
-            # -------------------------
-            # libcell_ids: 2D int tensor
-            # -------------------------
-            libcell_ids_path = os.path.join(bp, "libcell_ids.bin")
-            libcell_ids = load_2d_int_tensor(libcell_ids_path).long()  # shape [bsz, L]
+                # -------------------------
+                # libcell_ids: 2D int tensor
+                # -------------------------
+                libcell_ids_path = os.path.join(bp, "libcell_ids.bin")
+                libcell_ids = load_2d_int_tensor(libcell_ids_path).long()  # shape [bsz, L]
 
-            # -------------------------
-            # type_ids: 2D int tensor
-            # -------------------------
-            type_ids_path = os.path.join(bp, "encoder_2_input_libcell_type_ids.bin")
-            type_ids = load_2d_int_tensor(type_ids_path).long()  # shape [bsz, L2]
+                # -------------------------
+                # type_ids: 2D int tensor
+                # -------------------------
+                type_ids_path = os.path.join(bp, "encoder_2_input_libcell_type_ids.bin")
+                type_ids = load_2d_int_tensor(type_ids_path).long()  # shape [bsz, L2]
 
-            # -------------------------
-            # safe_encoder_2_output_avail_libcell_num
-            # -------------------------
-            avail_libcell_num_path = os.path.join(bp, "encoder_2_output_avail_libcell_num.bin")
-            safe_encoder_2 = load_2d_int_tensor(avail_libcell_num_path).long()  # shape [bsz, L2]
+                # -------------------------
+                # safe_encoder_2_output_avail_libcell_num
+                # -------------------------
+                avail_libcell_num_path = os.path.join(bp, "encoder_2_output_avail_libcell_num.bin")
+                safe_encoder_2 = load_2d_int_tensor(avail_libcell_num_path).long()  # shape [bsz, L2]
 
-            # -------------------------
-            # target: 2D tensor [bsz, L2]
-            # -------------------------
-            label_path = os.path.join(bp, "labels.bin")
-            target = load_2d_int_tensor(label_path).long()
+                # -------------------------
+                # target: 2D tensor [bsz, L2]
+                # -------------------------
+                label_path = os.path.join(bp, "labels.bin")
+                target = load_2d_int_tensor(label_path).long()
 
-            # Accumulate
-            all_data1.append(data1)
-            all_libcell_ids.append(libcell_ids)
-            all_targets.append(target)
-            all_type_ids.append(type_ids)
-            all_safe_encoder_2.append(safe_encoder_2)
+                # --- Basic Shape Consistency Check ---
+                bsz = data1.shape[0]
+                L = data1.shape[1]
+                L2 = type_ids.shape[1]
+                if not (libcell_ids.shape == (bsz, L) and
+                        target.shape == (bsz, L2) and
+                        safe_encoder_2.shape == (bsz, L2)):
+                    print(f"Warning: Shape mismatch detected in {bp}!")
+                    print(f"  data1: {data1.shape}")
+                    print(f"  libcell_ids: {libcell_ids.shape}")
+                    print(f"  type_ids: {type_ids.shape}")
+                    print(f"  target: {target.shape}")
+                    print(f"  safe_encoder_2: {safe_encoder_2.shape}")
+                    # Decide how to handle: skip this batch, raise error, etc.
+                    # For now, we'll try to continue, but padding might behave unexpectedly
+                    # if dimensions other than L/L2 mismatch. It's better to fix the data generation.
 
-            # Print the shapes of data1, data2, targets, type_ids, and safe_encoder_2
-            print(f"Data1 shape: {data1.shape}, Libcell IDs shape: {libcell_ids.shape}, Target shape: {target.shape}")
-            print(f"Type IDs shape: {type_ids.shape}, Safe Encoder 2 shape: {safe_encoder_2.shape}")
 
-            # Try to check the statistics of the input data, especially the padding tokens
-            valid_data1_mask = (data1 != 0.0)
-            valid_libcell_ids_mask = (libcell_ids != -1)
-            valid_type_ids_mask = (type_ids != -1)
-            valid_target_mask = (target != 0.0)
+                # Accumulate original tensors
+                all_data1.append(data1)
+                all_libcell_ids.append(libcell_ids)
+                all_targets.append(target)
+                all_type_ids.append(type_ids)
+                all_safe_encoder_2.append(safe_encoder_2)
 
-            # Pre-calculate padding masks (logical NOT of valid masks)
-            padding_data1_mask = ~valid_data1_mask
-            padding_libcell_ids_mask = ~valid_libcell_ids_mask
-            padding_type_ids_mask = ~valid_type_ids_mask
-            padding_target_mask = ~valid_target_mask
+                # Print the shapes of data1, data2, targets, type_ids, and safe_encoder_2
+                print(f"Data1 shape: {data1.shape}, Libcell IDs shape: {libcell_ids.shape}, Target shape: {target.shape}")
+                print(f"Type IDs shape: {type_ids.shape}, Safe Encoder 2 shape: {safe_encoder_2.shape}")
 
-            # Calculate counts and totals once
-            num_padding_data1 = padding_data1_mask.sum()
-            total_data1 = data1.numel()
+                # Try to check the statistics of the input data, especially the padding tokens
+                valid_data1_mask = (data1 != 0.0)
+                valid_libcell_ids_mask = (libcell_ids != -1)
+                valid_type_ids_mask = (type_ids != -1)
+                # In the current iteration of MLGateSizer.cc labels/targets are initialized to 0, this makes it difficult to distinguish padding tokens from valid tokens
+                # As some valid tokens may also be 0, so the share of padding tokens for target is not that reliable
+                valid_target_mask = (target != 0) 
 
-            num_padding_libcell = padding_libcell_ids_mask.sum()
-            total_libcell = libcell_ids.numel()
+                # Pre-calculate padding masks (logical NOT of valid masks)
+                padding_data1_mask = ~valid_data1_mask
+                padding_libcell_ids_mask = ~valid_libcell_ids_mask
+                padding_type_ids_mask = ~valid_type_ids_mask
+                padding_target_mask = ~valid_target_mask
 
-            num_padding_type = padding_type_ids_mask.sum()
-            total_type = type_ids.numel()
+                # Calculate counts and totals once
+                num_padding_data1 = padding_data1_mask.sum()
+                total_data1 = data1.numel()
 
-            num_padding_target = padding_target_mask.sum()
-            total_target = target.numel()
+                num_padding_libcell = padding_libcell_ids_mask.sum()
+                total_libcell = libcell_ids.numel()
 
-            # Print share information using pre-calculated values
-            print(f"Share of padding tokens in data1 (encoder_1 input): {(num_padding_data1 / total_data1).item():.2f} ({num_padding_data1} / {total_data1})")
-            print(f"Share of padding tokens in libcell_ids (encoder_1 input): {(num_padding_libcell / total_libcell).item():.2f} ({num_padding_libcell} / {total_libcell})")
-            print(f"Share of padding tokens in type_ids (encoder_2 input): {(num_padding_type / total_type).item():.2f} ({num_padding_type} / {total_type})")
-            print(f"Share of padding tokens in target (encoder_2 output): {(num_padding_target / total_target).item():.2f} ({num_padding_target} / {total_target})") # Using consistent padding count
+                num_padding_type = padding_type_ids_mask.sum()
+                total_type = type_ids.numel()
 
-            # Calculate sequence lengths (sum of valid tokens per sequence)
-            seq_lengths_enc1 = valid_libcell_ids_mask.sum(dim=1).float()
-            seq_lengths_enc2 = valid_type_ids_mask.sum(dim=1).float()
+                num_padding_target = padding_target_mask.sum()
+                total_target = target.numel()
 
-            # Calculate and print sequence length stats
-            avg_len_enc1 = seq_lengths_enc1.mean().item()
-            min_len_enc1 = seq_lengths_enc1.min().item()
-            max_len_enc1 = seq_lengths_enc1.max().item()
-            print(f"Average, Minimum, Maximum input sequence length of encoder 1 (padding tokens excluded): {avg_len_enc1:.2f}, {min_len_enc1}, {max_len_enc1}")
+                # Print share information using pre-calculated values
+                print(f"Share of padding tokens in data1 (encoder_1 input): {(num_padding_data1 / total_data1).item():.2f} ({num_padding_data1} / {total_data1})")
+                print(f"Share of padding tokens in libcell_ids (encoder_1 input): {(num_padding_libcell / total_libcell).item():.2f} ({num_padding_libcell} / {total_libcell})")
+                print(f"Share of padding tokens in type_ids (encoder_2 input): {(num_padding_type / total_type).item():.2f} ({num_padding_type} / {total_type})")
+                print(f"Share of padding tokens in target (encoder_2 output): {(num_padding_target / total_target).item():.2f} ({num_padding_target} / {total_target})") # Using consistent padding count
 
-            avg_len_enc2 = seq_lengths_enc2.mean().item()
-            min_len_enc2 = seq_lengths_enc2.min().item()
-            max_len_enc2 = seq_lengths_enc2.max().item()
-            print(f"Average, Minimum, Maximum input sequence length of encoder 2 (padding tokens excluded): {avg_len_enc2:.2f}, {min_len_enc2}, {max_len_enc2}\n")
+                # Calculate sequence lengths (sum of valid tokens per sequence)
+                seq_lengths_enc1 = valid_libcell_ids_mask.sum(dim=1).float()
+                seq_lengths_enc2 = valid_type_ids_mask.sum(dim=1).float()
 
-            # --- Generate and Save Histogram for Encoder 1 Sequence Lengths ---
-            if seq_lengths_enc1.numel() > 0: # Only plot if there's data
-                plt.figure(figsize=(10, 6))
-                # Convert tensor to numpy array for matplotlib
-                lengths_np = seq_lengths_enc1.cpu().numpy()
-                plt.hist(lengths_np, bins=min(50, int(max_len_enc1 - min_len_enc1 + 1)), edgecolor='black') # Adjust bins as needed
+                # Calculate and print sequence length stats
+                avg_len_enc1 = seq_lengths_enc1.mean().item()
+                min_len_enc1 = seq_lengths_enc1.min().item()
+                max_len_enc1 = seq_lengths_enc1.max().item()
+                print(f"Average, Minimum, Maximum input sequence length of encoder 1 (padding tokens excluded): {avg_len_enc1:.2f}, {min_len_enc1}, {max_len_enc1}")
 
-                plt.title(f'Encoder 1 Valid Sequence Length Distribution\n(Base Path: {os.path.basename(bp)})')
-                plt.xlabel('Valid Sequence Length (from libcell_ids != -1)')
-                plt.ylabel('Frequency (Number of Sequences)')
+                avg_len_enc2 = seq_lengths_enc2.mean().item()
+                min_len_enc2 = seq_lengths_enc2.min().item()
+                max_len_enc2 = seq_lengths_enc2.max().item()
+                print(f"Average, Minimum, Maximum input sequence length of encoder 2 (padding tokens excluded): {avg_len_enc2:.2f}, {min_len_enc2}, {max_len_enc2}")
 
-                # Prepare statistics text
-                stats_text = f'Average: {avg_len_enc1:.2f}\nMinimum: {min_len_enc1}\nMaximum: {max_len_enc1}'
+                # --- Generate and Save Histogram for Encoder 1 Sequence Lengths ---
+                if seq_lengths_enc1.numel() > 0: # Only plot if there's data
+                    plt.figure(figsize=(10, 6))
+                    # Convert tensor to numpy array for matplotlib
+                    lengths_np = seq_lengths_enc1.cpu().numpy()
+                    plt.hist(lengths_np, bins=min(50, int(max_len_enc1 - min_len_enc1 + 1)), edgecolor='black') # Adjust bins as needed
 
-                # Add text box with statistics to the plot
-                # Adjust x, y coordinates (0 to 1 relative to axes) and alignment as needed
-                plt.text(0.95, 0.95, stats_text, transform=plt.gca().transAxes, fontsize=10,
-                        verticalalignment='top', horizontalalignment='right',
-                        bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.5))
+                    plt.title(f'Encoder 1 Valid Sequence Length Distribution\n(Base Path: {os.path.basename(bp)})')
+                    plt.xlabel('Valid Sequence Length (from libcell_ids != -1)')
+                    plt.ylabel('Frequency (Number of Sequences)')
 
-                plt.grid(axis='y', alpha=0.75)
+                    # Prepare statistics text
+                    stats_text = f'Average: {avg_len_enc1:.2f}\nMinimum: {min_len_enc1}\nMaximum: {max_len_enc1}'
 
-                # Define save path and save the figure
-                hist_filename = "encoder1_valid_seq_len_histogram.png"
-                save_path = os.path.join(bp, hist_filename)
-                try:
-                    plt.savefig(save_path, bbox_inches='tight')
-                    print(f"Histogram saved to: {save_path}")
-                except Exception as e:
-                    print(f"Error saving histogram to {save_path}: {e}")
+                    # Add text box with statistics to the plot
+                    # Adjust x, y coordinates (0 to 1 relative to axes) and alignment as needed
+                    plt.text(0.95, 0.95, stats_text, transform=plt.gca().transAxes, fontsize=10,
+                            verticalalignment='top', horizontalalignment='right',
+                            bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.5))
 
-                # Close the plot to free memory
-                plt.close()
-            else:
-                print("Skipping histogram generation for Encoder 1: No sequence length data found.")
+                    plt.grid(axis='y', alpha=0.75)
+
+                    # Define save path and save the figure
+                    hist_filename = "encoder1_valid_seq_len_histogram.png"
+                    save_path = os.path.join(bp, hist_filename)
+                    try:
+                        plt.savefig(save_path, bbox_inches='tight')
+                        print(f"Histogram saved to: {save_path}\n")
+                    except Exception as e:
+                        print(f"Error saving histogram to {save_path}: {e}\n")
+
+                    # Close the plot to free memory
+                    plt.close()
+                else:
+                    print("Skipping histogram generation for Encoder 1: No sequence length data found.")
+
+            except FileNotFoundError as e:
+                print(f"Error loading data from {bp}: {e}. Skipping this path.")
+            except Exception as e:
+                print(f"An unexpected error occurred while loading data from {bp}: {e}. Skipping this path.")
+        
+        if not all_data1: # Check if any data was loaded successfully
+            raise ValueError("No data loaded successfully. Check base_paths and file existence.")
+        
+        # --- Determine Maximum Sequence Lengths ---
+        # Max length for encoder 1 inputs (data1, libcell_ids) - dimension 1
+        max_len_L = 0
+        for t in all_data1:
+            max_len_L = max(max_len_L, t.shape[1])
+        # Double check with libcell_ids (should ideally be the same)
+        for t in all_libcell_ids:
+            max_len_L = max(max_len_L, t.shape[1])
+        print(f"Determined maximum sequence length L (Encoder 1): {max_len_L}")
+
+        # Max length for encoder 2 inputs/outputs (type_ids, targets, safe_encoder_2) - dimension 1
+        max_len_L2 = 0
+        for t in all_type_ids:
+            max_len_L2 = max(max_len_L2, t.shape[1])
+        # Double check with targets and safe_encoder_2
+        for t in all_targets:
+            max_len_L2 = max(max_len_L2, t.shape[1])
+        for t in all_safe_encoder_2:
+            max_len_L2 = max(max_len_L2, t.shape[1])
+        print(f"Determined maximum sequence length L2 (Encoder 2): {max_len_L2}")
+
+
+        # --- Pad Tensors and Store in New Lists ---
+        padded_data1 = []
+        padded_libcell_ids = []
+        padded_targets = []
+        padded_type_ids = []
+        padded_safe_encoder_2 = []
+
+        pad_value_float = 0.0
+        pad_value_int = -1 # Use -1 for padding integer IDs, matching mask logic
+        pad_value_target = 0 # Use 0 for padding target labels
+
+        for i in range(len(all_data1)):
+            # Pad tensors related to L
+            current_L = all_data1[i].shape[1]
+            pad_amount_L = max_len_L - current_L
+            # F.pad format: (pad_left, pad_right, pad_top, pad_bottom, ...) applied from last dim backwards
+            # For data1 (B, L, D), pad L (dim 1): needs (0, 0 for D, 0, pad_amount_L for L)
+            if pad_amount_L > 0:
+                padded_data1.append(F.pad(all_data1[i], (0, 0, 0, pad_amount_L), mode='constant', value=pad_value_float))
+                # For libcell_ids (B, L), pad L (dim 1): needs (0, pad_amount_L for L)
+                padded_libcell_ids.append(F.pad(all_libcell_ids[i], (0, pad_amount_L), mode='constant', value=pad_value_int))
+            else: # No padding needed if already max length
+                padded_data1.append(all_data1[i])
+                padded_libcell_ids.append(all_libcell_ids[i])
+
+
+            # Pad tensors related to L2
+            current_L2 = all_type_ids[i].shape[1]
+            pad_amount_L2 = max_len_L2 - current_L2
+            if pad_amount_L2 > 0:
+                # For type_ids, targets, safe_encoder_2 (B, L2), pad L2 (dim 1): needs (0, pad_amount_L2 for L2)
+                padded_type_ids.append(F.pad(all_type_ids[i], (0, pad_amount_L2), mode='constant', value=pad_value_int))
+                padded_targets.append(F.pad(all_targets[i], (0, pad_amount_L2), mode='constant', value=pad_value_target))
+                padded_safe_encoder_2.append(F.pad(all_safe_encoder_2[i], (0, pad_amount_L2), mode='constant', value=pad_value_int))
+            else: # No padding needed
+                padded_type_ids.append(all_type_ids[i])
+                padded_targets.append(all_targets[i])
+                padded_safe_encoder_2.append(all_safe_encoder_2[i])
+
 
         # ----------------------------------------------------
-        # Concatenate along dimension=0 (the batch dimension)
+        # Concatenate PADDED tensors along dimension=0 (the batch dimension)
         # ----------------------------------------------------
-        self.data1 = torch.cat(all_data1, dim=0)     # shape [sum(bsz), L, D_in], encoder_1_numerical data
-        self.libcell_ids = torch.cat(all_libcell_ids, dim=0)     # shape [sum(bsz), L], encoder_1_libcell_ids
-        self.targets = torch.cat(all_targets, dim=0) # shape [sum(bsz), L2]
-        self.type_ids = torch.cat(all_type_ids, dim=0) # shape [sum(bsz), L2], encoder_2_input_libcell_type_ids
-        self.safe_encoder_2 = torch.cat(all_safe_encoder_2, dim=0) # shape [sum(bsz), L2], encoder_2_output_avail_libcell_num
+        self.data1 = torch.cat(padded_data1, dim=0)     # shape [sum(bsz), L_max, D_in], encoder_1_numerical data
+        self.libcell_ids = torch.cat(padded_libcell_ids, dim=0)     # shape [sum(bsz), L_max], encoder_1_libcell_ids
+        self.targets = torch.cat(padded_targets, dim=0) # shape [sum(bsz), L2_max]
+        self.type_ids = torch.cat(padded_type_ids, dim=0) # shape [sum(bsz), L2_max], encoder_2_input_libcell_type_ids
+        self.safe_encoder_2 = torch.cat(padded_safe_encoder_2, dim=0) # shape [sum(bsz), L2_max], encoder_2_output_avail_libcell_num
 
         # Just to confirm final shapes:
+        print(f"\n--- After Padding and Concatenation ---")
         print(f"Final combined data1 shape: {self.data1.shape}")
         print(f"Final combined libcell_ids shape: {self.libcell_ids.shape}")
         print(f"Final combined targets shape: {self.targets.shape}")
@@ -1385,6 +1482,7 @@ def train_multiple_paths(
     # ---------------------------------------------------------------------
     # B) Create the Dataset + DataLoader
     # ---------------------------------------------------------------------
+    print("Loading Training Data...")
     dataset = MultiPathDataset(base_paths=base_paths)
     # The type embeddings are stored in dataset.type_embeddings
     # if you want them in your training loop for anything else.
@@ -1392,6 +1490,7 @@ def train_multiple_paths(
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=False)
 
     # Create a validation dataset if provided
+    print("Loading Validation Data...")
     val_dataset = MultiPathDataset(base_paths=val_paths) if val_paths else None
 
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False) if val_dataset else None
@@ -1539,6 +1638,10 @@ if __name__ == "__main__":
     # This masks out libcell's that exceed the maximum number of available libcells for that particular libcell type
     #trained_model = example_train_5(base_path= "./NV_NVDLA_partition_m", num_epochs=1, warmup_ratio=0.2)
     torch.set_float32_matmul_precision('high')
+
+    print("Test models with padding")
+    test_attention_masking()
+    test_two_encoder_transformer_masking()
 
     train_base_dir = ["./NV_NVDLA_partition_p", "./ariane136", "./aes_256", "./NV_NVDLA_partition_m", "./mempool_tile_wrap"]#["./train_data/NV_NVDLA_partition_m"]
 #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#,"./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#, "./train_data/mempool_tile_wrap"]
