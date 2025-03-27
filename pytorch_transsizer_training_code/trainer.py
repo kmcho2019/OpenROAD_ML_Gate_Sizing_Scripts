@@ -1437,6 +1437,72 @@ class MultiPathDataset(Dataset):
             self.safe_encoder_2[idx]
         )
 
+# =====================================================================
+# Helper function for plotting
+# =====================================================================
+def plot_training_progress(
+    batch_steps, batch_losses,
+    epoch_steps, epoch_train_losses, epoch_train_accuracies,
+    epoch_val_losses, epoch_val_accuracies,
+    save_path=None
+):
+    """
+    Plots batch training loss, epoch training/validation loss, and epoch training/validation accuracy.
+
+    Args:
+        batch_steps (list): List of global steps corresponding to each batch loss.
+        batch_losses (list): List of training losses for each batch.
+        epoch_steps (list): List of global steps at the end of each epoch.
+        epoch_train_losses (list): List of average training losses for each epoch.
+        epoch_train_accuracies (list): List of training accuracies for each epoch.
+        epoch_val_losses (list): List of average validation losses for each epoch (can be empty).
+        epoch_val_accuracies (list): List of validation accuracies for each epoch (can be empty).
+        save_path (str, optional): Path to save the plot image. If None, displays the plot.
+    """
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+
+    # --- Loss Plotting (Left Y-axis) ---
+    color = 'tab:blue'
+    ax1.set_xlabel('Global Step')
+    ax1.set_ylabel('Loss', color=color)
+    # Plot batch loss with high transparency
+    ax1.plot(batch_steps, batch_losses, color=color, alpha=0.3, label='Batch Training Loss (Smoothed Trend)') # Smoothed view
+    # Plot epoch training loss
+    ax1.plot(epoch_steps, epoch_train_losses, 'o-', color='tab:red', label='Epoch Training Loss')
+    # Plot epoch validation loss if available
+    if epoch_val_losses:
+        ax1.plot(epoch_steps, epoch_val_losses, 's--', color='tab:orange', label='Epoch Validation Loss')
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.grid(True, axis='y', linestyle='--', alpha=0.7)
+
+    # --- Accuracy Plotting (Right Y-axis) ---
+    ax2 = ax1.twinx() # instantiate a second axes that shares the same x-axis
+    color = 'tab:green'
+    ax2.set_ylabel('Accuracy', color=color) # we already handled the x-label with ax1
+    # Plot epoch training accuracy
+    ax2.plot(epoch_steps, epoch_train_accuracies, '^-', color='tab:purple', label='Epoch Training Accuracy')
+    # Plot epoch validation accuracy if available
+    if epoch_val_accuracies:
+        ax2.plot(epoch_steps, epoch_val_accuracies, 'd--', color='tab:cyan', label='Epoch Validation Accuracy')
+    ax2.tick_params(axis='y', labelcolor=color)
+    ax2.set_ylim(0, 1.05) # Accuracy typically between 0 and 1
+
+    # --- Final Touches ---
+    fig.suptitle('Training Progress')
+    # Combine legends from both axes
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='best')
+
+    fig.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to prevent title overlap
+
+    if save_path:
+        plt.savefig(save_path)
+        print(f"Plot saved to {save_path}")
+    else:
+        plt.show()
+    plt.close(fig) # Close the figure to free memory
+
 # -------------------------------------------------------------------------
 # 3. Example Training Function using DataLoader
 # -------------------------------------------------------------------------
@@ -1447,11 +1513,22 @@ def train_multiple_paths(
     warmup_ratio=0.1,
     batch_size=2,
     shuffle=True,
-    device="cpu"
+    device="cpu",
+    plot_save_path="training_plot.png"
 ):
     """
     Demonstration of how to train using data from multiple base_paths with mini-batching.
     """
+    # --- Data storage for plotting ---
+    batch_losses = []
+    batch_steps = []
+    epoch_train_losses = []
+    epoch_train_accuracies = []
+    epoch_val_losses = []
+    epoch_val_accuracies = []
+    epoch_steps = []
+    # --------------------------------
+
     # ---------------------------------------------------------------------
     # A) Create model (same as your single-batch code)
     # ---------------------------------------------------------------------
@@ -1546,27 +1623,37 @@ def train_multiple_paths(
 
             # Compute loss
             loss = criterion(out, target_batch, safe_encoder_2_batch)
+
+            # --- Store batch loss and step for plotting ---
+            current_loss = loss.item()
+            batch_losses.append(current_loss)
+            batch_steps.append(global_step)
+            # ---------------------------------------------
+
             loss.backward()
             optimizer.step()
             scheduler.step()   # Update LR per-step
-            global_step += 1
 
-            epoch_loss += loss.item()
+
+
+            epoch_loss += current_loss
+            global_step += 1
 
             # -----------------------------------------------------------------
             # Accuracy (excluding padding)
             # The padding tokens at end of each sequence are excluded from accuracy calculation
             # They can be identified as the type_ids == -1 for the second encoder
             # -----------------------------------------------------------------
-            preds = out.argmax(dim=2)  # shape [bsz, L2]
+            with torch.no_grad():
+                preds = out.argmax(dim=2)  # shape [bsz, L2]
 
-            # Use type_ids to compute accuracy excluding padding tokens
-            mask = (type_ids_batch != -1) # Shape: [bsz, L2], valid positions
-            valid_correct = (preds[mask] == target_batch[mask]).sum().item()
-            valid_total = mask.sum().item()
-            valid_accuracy = valid_correct / valid_total if valid_total > 0 else 0.0
-            epoch_padding_excluded_correct += valid_correct
-            epoch_padding_excluded_total += valid_total
+                # Use type_ids to compute accuracy excluding padding tokens
+                mask = (type_ids_batch != -1) # Shape: [bsz, L2], valid positions
+                valid_correct = (preds[mask] == target_batch[mask]).sum().item()
+                valid_total = mask.sum().item()
+                valid_accuracy = valid_correct / valid_total if valid_total > 0 else 0.0
+                epoch_padding_excluded_correct += valid_correct
+                epoch_padding_excluded_total += valid_total
 
             # Update progress bar with current loss and learning rate
             train_bar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{scheduler.get_last_lr()[0]:.6f}")
@@ -1577,6 +1664,11 @@ def train_multiple_paths(
         epoch_padding_excluded_acc = epoch_padding_excluded_correct / epoch_padding_excluded_total if epoch_padding_excluded_total > 0 else 0.0
         avg_epoch_loss = epoch_loss / len(dataloader)
 
+        # --- Store epoch training metrics for plotting ---
+        epoch_train_losses.append(avg_epoch_loss)
+        epoch_train_accuracies.append(epoch_padding_excluded_acc)
+        epoch_steps.append(global_step) # Record step count at the end of the epoch
+        # ------------------------------------------------
 
         print(
             f"Epoch [{epoch+1}/{num_epochs}] | "
@@ -1586,6 +1678,8 @@ def train_multiple_paths(
             f"Accuracy={epoch_padding_excluded_acc*100:.2f}%"  # Accuracy excluding padding tokens
         )
         # Validation loop (if provided)
+        avg_val_loss = float('nan') # Default if no validation
+        val_padding_excluded_acc = float('nan')
         if val_dataloader:
             model.eval()
             val_loss_total = 0.0
@@ -1615,6 +1709,12 @@ def train_multiple_paths(
             # Compute validation metrics
             val_padding_excluded_acc = val_padding_excluded_correct / val_padding_excluded_total if val_padding_excluded_total > 0 else 0.0
             avg_val_loss = val_loss_total / len(val_dataloader)
+
+            # --- Store epoch validation metrics for plotting ---
+            epoch_val_losses.append(avg_val_loss)
+            epoch_val_accuracies.append(val_padding_excluded_acc)
+            # ----------------------------------------------------
+
             # Print validation metrics
             print(
                 f"Validation | "
@@ -1622,10 +1722,26 @@ def train_multiple_paths(
                 f"Accuracy={val_padding_excluded_acc*100:.2f}%"  # Accuracy excluding padding tokens
             )
             model.train() # Set back to train mode
-
+        else:
+            # If no validation, append NaN or skip to keep lists aligned if needed,
+            # but our plotting function handles potentially empty val lists.
+            epoch_val_losses.append(float('nan'))
+            epoch_val_accuracies.append(float('nan'))
 
 
     print("Training complete.")
+
+    # --- Plotting after training ---
+    print("Generating training plot...")
+    plot_training_progress(
+        batch_steps, batch_losses,
+        epoch_steps, epoch_train_losses, epoch_train_accuracies,
+        epoch_val_losses if val_dataloader else [], # Pass empty lists if no validation
+        epoch_val_accuracies if val_dataloader else [],
+        save_path=plot_save_path
+    )
+    # -------------------------------
+
     return model
 
 if __name__ == "__main__":
@@ -1643,13 +1759,13 @@ if __name__ == "__main__":
     test_attention_masking()
     test_two_encoder_transformer_masking()
 
-    train_base_dir = ["./NV_NVDLA_partition_p", "./ariane136", "./aes_256", "./NV_NVDLA_partition_m", "./mempool_tile_wrap"]#["./train_data/NV_NVDLA_partition_m"]
+    train_base_dir = ["./ariane136", "./NV_NVDLA_partition_m", "./NV_NVDLA_partition_p"]#["./train_data/NV_NVDLA_partition_m"]
 #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#,"./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#, "./train_data/mempool_tile_wrap"]
-    val_base_dir = ["./mempool_tile_wrap"]#["./train_data/NV_NVDLA_partition_m"]
+    val_base_dir = ["./aes_256"]#["./train_data/NV_NVDLA_partition_m"]
     trained_model = train_multiple_paths(
         base_paths=train_base_dir,
         val_paths=val_base_dir,
-        num_epochs=200,#200,#2,
+        num_epochs=50,#200,#2,
         warmup_ratio=0.2,
         batch_size=512,
         shuffle=True,
