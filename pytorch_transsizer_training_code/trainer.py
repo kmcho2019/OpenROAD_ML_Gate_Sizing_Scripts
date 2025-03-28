@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 
 import torch.nn.functional as F
 
+import argparse
+
 def load_embeddings(filename):
     with open(filename, 'rb') as f:
         # Read N and D
@@ -1568,6 +1570,7 @@ def train_multiple_paths(
     val_paths=None,
     num_epochs=5,
     warmup_ratio=0.1,
+    lr=1e-3,
     batch_size=2,
     shuffle=True,
     device="cpu",
@@ -1633,7 +1636,7 @@ def train_multiple_paths(
     # C) Define Loss and Optimizer
     # ---------------------------------------------------------------------
     criterion = CustomCrossEntropyLoss()  # or nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
     # ---------------------------------------------------------------------
     # D) LR Scheduler: Linear Warmup & Decay (per-step)
@@ -1811,8 +1814,23 @@ if __name__ == "__main__":
     # This masks out libcell's that exceed the maximum number of available libcells for that particular libcell type
     #trained_model = example_train_5(base_path= "./NV_NVDLA_partition_m", num_epochs=1, warmup_ratio=0.2)
     torch.set_float32_matmul_precision('high')
+    parser = argparse.ArgumentParser(description="Train a Transformer model for MLGateSizer.")
+    parser.add_argument("--train_base_dir", type=str, nargs="*", default=["./NV_NVDLA_partition_m"],
+                        help="List of base directories containing training data.")
+    parser.add_argument("--val_base_dir", type=str, nargs="+", default=None,
+                        help="List of base directories containing validation data.")
+    parser.add_argument("--num_epochs", type=int, default=10,
+                        help="Number of epochs to train.")
+    parser.add_argument("--warmup_ratio", type=float, default=0.2,
+                        help="Ratio of total steps for linear LR warmup.")
+    parser.add_argument("--lr", type=float, default=1e-3,
+                        help="Learning rate for training.")
+    parser.add_argument("--batch_size", type=int, default=512,
+                        help="Batch size for training.")
+    args = parser.parse_args()
+    
 
-    print("Test models with padding")
+    # print("Test models with padding")
     # test_attention_masking()
     # test_two_encoder_transformer_masking()
 
@@ -1820,11 +1838,12 @@ if __name__ == "__main__":
 #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#,"./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#, "./train_data/mempool_tile_wrap"]
     val_base_dir = ["./NV_NVDLA_partition_m"]#["./aes_256"]#["./train_data/NV_NVDLA_partition_m"]
     trained_model = train_multiple_paths(
-        base_paths=train_base_dir,
-        val_paths=val_base_dir,
-        num_epochs=10,#200,#2,
-        warmup_ratio=0.2,
-        batch_size=512,
+        base_paths=args.train_base_dir,#train_base_dir,
+        val_paths=args.val_base_dir,#val_base_dir,
+        num_epochs=args.num_epochs,#200,#2,
+        warmup_ratio=args.warmup_ratio,#0.2,
+        lr=args.lr,#1e-3,
+        batch_size=args.batch_size,#512,
         shuffle=True,
         device="cuda:0"
     )
