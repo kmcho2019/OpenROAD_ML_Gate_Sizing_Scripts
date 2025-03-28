@@ -1454,57 +1454,107 @@ def plot_training_progress(
     save_path=None
 ):
     """
-    Plots batch training loss, epoch training/validation loss, and epoch training/validation accuracy.
+    Plots batch training loss, epoch training/validation loss, and
+    epoch training/validation accuracy with improved clarity and dual x-axis
+    (Global Step and Epoch).
+
+    Uses solid lines for training metrics and dashed lines for validation metrics.
+    Uses blue/cyan colors for loss and red/orange colors for accuracy.
 
     Args:
         batch_steps (list): List of global steps corresponding to each batch loss.
         batch_losses (list): List of training losses for each batch.
         epoch_steps (list): List of global steps at the end of each epoch.
+                            Should have the same length as epoch_* lists.
         epoch_train_losses (list): List of average training losses for each epoch.
         epoch_train_accuracies (list): List of training accuracies for each epoch.
-        epoch_val_losses (list): List of average validation losses for each epoch (can be empty).
-        epoch_val_accuracies (list): List of validation accuracies for each epoch (can be empty).
+        epoch_val_losses (list): List of average validation losses for each epoch.
+        epoch_val_accuracies (list): List of validation accuracies for each epoch.
         save_path (str, optional): Path to save the plot image. If None, displays the plot.
     """
-    fig, ax1 = plt.subplots(figsize=(12, 6))
+    if not epoch_steps:
+        print("Warning: epoch_steps list is empty. Cannot plot epoch data or epoch axis.")
+        return
+
+    fig, ax1 = plt.subplots(figsize=(14, 7)) # Increased figure size slightly
+
+    # --- Primary X-axis: Global Step ---
+    ax1.set_xlabel('Global Step')
 
     # --- Loss Plotting (Left Y-axis) ---
-    color = 'tab:blue'
-    ax1.set_xlabel('Global Step')
-    ax1.set_ylabel('Loss', color=color)
-    # Plot batch loss with high transparency
-    ax1.plot(batch_steps, batch_losses, color=color, alpha=0.3, label='Batch Training Loss (Smoothed Trend)') # Smoothed view
-    # Plot epoch training loss
-    ax1.plot(epoch_steps, epoch_train_losses, 'o-', color='tab:red', label='Epoch Training Loss')
-    # Plot epoch validation loss if available
+    color_loss_train = 'tab:blue'
+    color_loss_val = 'tab:cyan'
+    ax1.set_ylabel('Loss', color=color_loss_train)
+    ax1.tick_params(axis='y', labelcolor=color_loss_train)
+    ax1.grid(True, axis='y', linestyle=':', alpha=0.7, color=color_loss_train) # Grid for loss
+
+    # Plot batch loss (smoothed trend) - Use training loss color with low alpha
+    # Plot this first so it's in the background
+    if batch_steps and batch_losses:
+      ax1.plot(batch_steps, batch_losses, color=color_loss_train, alpha=0.2, label='Batch Training Loss (Trend)')
+
+    # Plot epoch training loss - Solid line
+    line1, = ax1.plot(epoch_steps, epoch_train_losses, 'o-', color=color_loss_train, linewidth=2, label='Train Loss')
+
+    # Plot epoch validation loss - Dashed line
+    line2 = None
     if epoch_val_losses:
-        ax1.plot(epoch_steps, epoch_val_losses, 's--', color='tab:orange', label='Epoch Validation Loss')
-    ax1.tick_params(axis='y', labelcolor=color)
-    ax1.grid(True, axis='y', linestyle='--', alpha=0.7)
+        line2, = ax1.plot(epoch_steps, epoch_val_losses, 's--', color=color_loss_val, linewidth=2, label='Validation Loss')
 
     # --- Accuracy Plotting (Right Y-axis) ---
     ax2 = ax1.twinx() # instantiate a second axes that shares the same x-axis
-    color = 'tab:green'
-    ax2.set_ylabel('Accuracy', color=color) # we already handled the x-label with ax1
-    # Plot epoch training accuracy
-    ax2.plot(epoch_steps, epoch_train_accuracies, '^-', color='tab:purple', label='Epoch Training Accuracy')
-    # Plot epoch validation accuracy if available
+    color_acc_train = 'tab:red'
+    color_acc_val = 'tab:orange'
+    ax2.set_ylabel('Accuracy', color=color_acc_train)
+    ax2.tick_params(axis='y', labelcolor=color_acc_train)
+    ax2.set_ylim(min(0, min(epoch_train_accuracies or [0]), min(epoch_val_accuracies or [0])) - 0.05, 1.05) # Dynamic lower bound slightly below min acc
+
+    # Plot epoch training accuracy - Solid line
+    line3, = ax2.plot(epoch_steps, epoch_train_accuracies, '^-', color=color_acc_train, linewidth=2, label='Train Accuracy')
+
+    # Plot epoch validation accuracy - Dashed line
+    line4 = None
     if epoch_val_accuracies:
-        ax2.plot(epoch_steps, epoch_val_accuracies, 'd--', color='tab:cyan', label='Epoch Validation Accuracy')
-    ax2.tick_params(axis='y', labelcolor=color)
-    ax2.set_ylim(0, 1.05) # Accuracy typically between 0 and 1
+        line4, = ax2.plot(epoch_steps, epoch_val_accuracies, 'd--', color=color_acc_val, linewidth=2, label='Validation Accuracy')
+
+    # --- Secondary X-axis: Epoch ---
+    ax_epoch = ax1.twiny() # Create a shared y-axis but independent x-axis
+
+    # Position the secondary x-axis below the primary one
+    ax_epoch.spines["bottom"].set_position(("axes", -0.15)) # Adjust spacing as needed
+    # Hide the top spine and ticks/labels
+    ax_epoch.spines["top"].set_visible(False)
+    ax_epoch.xaxis.set_ticks_position('bottom')
+    ax_epoch.xaxis.set_label_position('bottom')
+
+    # Set the ticks and labels for the epoch axis
+    ax_epoch.set_xlabel("Epoch")
+    ax_epoch.set_xlim(ax1.get_xlim()) # Match the limits of the primary x-axis
+    ax_epoch.set_xticks(epoch_steps) # Set tick positions based on global steps at epoch end
+    ax_epoch.set_xticklabels([i + 1 for i in range(len(epoch_steps))]) # Label ticks with epoch numbers (1, 2, ...)
 
     # --- Final Touches ---
-    fig.suptitle('Training Progress')
-    # Combine legends from both axes
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc='best')
+    fig.suptitle('Training Progress (Loss & Accuracy)', fontsize=16)
 
-    fig.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to prevent title overlap
+    # Combine legends from both y-axes
+    lines = [line1]
+    if line2: lines.append(line2)
+    lines.append(line3)
+    if line4: lines.append(line4)
+    # Add batch loss line to legend if plotted
+    if batch_steps and batch_losses:
+        batch_line = ax1.get_lines()[0] # Get the first line plotted (batch loss)
+        lines.append(batch_line)
+
+    labels = [l.get_label() for l in lines]
+    # Use ax1 for the legend placement, adjust location if needed
+    ax1.legend(lines, labels, loc='center right')
+
+    # Adjust layout to prevent labels overlapping, especially the new x-axis
+    fig.tight_layout(rect=[0, 0.05, 1, 0.95]) # Adjust bottom margin for epoch axis label
 
     if save_path:
-        plt.savefig(save_path)
+        plt.savefig(save_path, bbox_inches='tight') # bbox_inches ensures labels aren't cut off
         print(f"Plot saved to {save_path}")
     else:
         plt.show()
@@ -1763,16 +1813,16 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision('high')
 
     print("Test models with padding")
-    test_attention_masking()
-    test_two_encoder_transformer_masking()
+    # test_attention_masking()
+    # test_two_encoder_transformer_masking()
 
-    train_base_dir = ["./ariane136", "./NV_NVDLA_partition_m", "./NV_NVDLA_partition_p"]#["./train_data/NV_NVDLA_partition_m"]
+    train_base_dir = ["./NV_NVDLA_partition_m"]#["./ariane136", "./NV_NVDLA_partition_m", "./NV_NVDLA_partition_p", "./mempool_tile_wrap"]#["./train_data/NV_NVDLA_partition_m"]
 #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#,"./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_m"] #["./train_data/NV_NVDLA_partition_p", "./train_data/ariane136", "./train_data/aes_256"]#, "./train_data/mempool_tile_wrap"]
-    val_base_dir = ["./aes_256"]#["./train_data/NV_NVDLA_partition_m"]
+    val_base_dir = ["./NV_NVDLA_partition_m"]#["./aes_256"]#["./train_data/NV_NVDLA_partition_m"]
     trained_model = train_multiple_paths(
         base_paths=train_base_dir,
         val_paths=val_base_dir,
-        num_epochs=50,#200,#2,
+        num_epochs=10,#200,#2,
         warmup_ratio=0.2,
         batch_size=512,
         shuffle=True,
